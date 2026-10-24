@@ -127,7 +127,9 @@ namespace Tbot.Workers {
 				(long)_tbotInstance.InstanceSettings.Expeditions.ManualShips.Ships.Pathfinder);
 		}
 
-		private Ships BuildExpeditionFleet(Celestial origin, LFBonuses lfBonuses) {
+		private Ships BuildExpeditionFleet(Celestial origin, LFBonuses lfBonuses, int pendingFromOrigin) {
+			if (pendingFromOrigin <= 0)
+				return new Ships();
 			if ((bool)_tbotInstance.InstanceSettings.Expeditions.ManualShips.Active)
 				return BuildManualExpeditionFleet();
 
@@ -139,14 +141,21 @@ namespace Tbot.Workers {
 			if (primaryShip == Buildables.Null)
 				return new Ships();
 
-			var availableShips = origin.Ships?.GetMovableShips() ?? new Ships();
+			// Reserves must not alter the shared, freshly read origin snapshot.
+			var availableShips = new Ships();
+			if (origin.Ships != null)
+				foreach (var property in typeof(Ships).GetProperties())
+					property.SetValue(availableShips, property.GetValue(origin.Ships));
+			availableShips = availableShips.GetMovableShips();
 			if (SettingsService.IsSettingSet(_tbotInstance.InstanceSettings.Expeditions, "PrimaryToKeep") &&
 				(int)_tbotInstance.InstanceSettings.Expeditions.PrimaryToKeep > 0) {
 				availableShips.SetAmount(primaryShip, Math.Max(0,
 					availableShips.GetAmount(primaryShip) - (long)_tbotInstance.InstanceSettings.Expeditions.PrimaryToKeep));
 			}
 
-			return _calculationService.CalcFullExpeditionShips(
+			// Keep one-flight escort selection: a scarce escort can join this send
+			// even when there are not enough of that type for every pending fleet.
+			var fleet = _calculationService.CalcFullExpeditionShips(
 				availableShips,
 				primaryShip,
 				1,
@@ -155,6 +164,12 @@ namespace Tbot.Workers {
 				lfBonuses,
 				_tbotInstance.UserData.userInfo.Class,
 				_tbotInstance.UserData.serverData.ProbeCargo);
+			var availablePrimary = Math.Max(0, availableShips.GetAmount(primaryShip));
+			var primaryShare = availablePrimary / pendingFromOrigin;
+			if (availablePrimary % pendingFromOrigin != 0)
+				primaryShare++;
+			fleet.SetAmount(primaryShip, Math.Min(fleet.GetAmount(primaryShip), primaryShare));
+			return fleet;
 		}
 
 		private async Task<Ships> RefreshExpeditionShips(Celestial origin) {
@@ -385,7 +400,11 @@ namespace Tbot.Workers {
 					}
 
 					try {
-						fleet = BuildExpeditionFleet(origin, lfBonuses);
+						var pendingDispatches = Math.Min(remaining, Math.Min(
+							_tbotInstance.UserData.slots.ExpFree,
+							_tbotInstance.UserData.slots.Free - (int)_tbotInstance.InstanceSettings.General.SlotsToLeaveFree));
+						var pendingFromOrigin = dispatchPlanner.CountPendingDispatches(originIndex.Value, pendingDispatches);
+						fleet = BuildExpeditionFleet(origin, lfBonuses, pendingFromOrigin);
 					} catch (OperationCanceledException) when (_ct.IsCancellationRequested) {
 						throw;
 					} catch (Exception e) {
