@@ -1,14 +1,14 @@
 # Maintaining our TBot fork
 
-The independent maintenance line is `main` in [sanyo4ever/TBot](https://github.com/sanyo4ever/TBot) and [sanyo4ever/ogame.mod](https://github.com/sanyo4ever/ogame.mod). Ronnie is the primary upstream source for this release line. The reviewed TBot base is [ronnie32/TBot v3.5.1-beta2](https://github.com/ronnie32/TBot/releases/tag/v3.5.1-beta2), commit `521f43f3bb56aa01f847a6b56a89e46b774e0016` on `fix/ogame-v13-tbot-3.4.7`. Its reviewed Go gitlink is `e9f365f803e15f937916ef152462f231b8676512` on [ronnie32/ogame.mod](https://github.com/ronnie32/ogame.mod), branch `release/v13-beta10`.
+The independent maintenance line is `main` in [sanyo4ever/TBot-Ronnie](https://github.com/sanyo4ever/TBot-Ronnie) and [sanyo4ever/ogame.mod](https://github.com/sanyo4ever/ogame.mod). Ronnie is the primary upstream source for this release line. The reviewed TBot base is [ronnie32/TBot v3.5.1-beta2](https://github.com/ronnie32/TBot/releases/tag/v3.5.1-beta2), commit `521f43f3bb56aa01f847a6b56a89e46b774e0016` on `fix/ogame-v13-tbot-3.4.7`. Its reviewed Go gitlink is `e9f365f803e15f937916ef152462f231b8676512` on [ronnie32/ogame.mod](https://github.com/ronnie32/ogame.mod), branch `release/v13-beta10`.
 
-Integrate Ronnie's history with our previous maintenance history and preserve applicable fixes; do not reset our main to another fork's branch. GitHub's fork-parent label does not determine the code base. Changes proposed to Ronnie must remain compatible with his .NET9 projects and exclude our fork version/CI policy. Our independent fork builds use .NET10 and the checked-in `global.json`; the reviewed Go baseline is Go1.23.1 and CI reads its version from `ogame/go.mod`.
+Integrate Ronnie's history with our previous maintenance history and preserve applicable fixes; do not reset our main to another fork's branch. The new TBot repository is a direct GitHub fork of Ronnie. The former sanyo4ever/TBot belongs to a different GitHub fork network; its maintenance history is retained here, and it is now the legacy line. Changes proposed to Ronnie must remain compatible with his .NET9 projects and exclude our fork version/CI policy. Our independent fork builds use .NET10 and the checked-in `global.json`; the reviewed Go baseline is Go1.23.1 and CI reads its version from `ogame/go.mod`.
 
 ## Development
 
 ```sh
-git clone --recurse-submodules --branch main https://github.com/sanyo4ever/TBot.git
-cd TBot
+git clone --recurse-submodules --branch main https://github.com/sanyo4ever/TBot-Ronnie.git
+cd TBot-Ronnie
 git switch -c fix/short-description
 python3 -m unittest discover -s tools/tests -v
 dotnet test TBot.sln -c Release
@@ -45,9 +45,9 @@ When Ronnie publishes a new release, review its actual release branch, tag, Go g
 ## Creating our releases
 
 1. Commit the intended TBot and Go changes on our main. Require green tests, independent integration review and all seven packages. Check that `fork-version.json`, project metadata, exact Go gitlink and `docs/releases/VERSION.md` agree.
-2. Open [Actions / Fork CI and release](https://github.com/sanyo4ever/TBot/actions/workflows/build.yml), choose **Run workflow**, select **main**, and enter `3.5.1-beta2a`. A manual release request from any other branch fails validation.
+2. Open [Actions / Fork CI and release](https://github.com/sanyo4ever/TBot-Ronnie/actions/workflows/build.yml), choose **Run workflow**, select **main**, and enter `3.5.1-beta2a`. A manual release request from any other branch fails validation.
 3. The workflow runs version-policy, C# and Go tests, verifies the pinned Go checkout, and builds all seven packages. Only after every package succeeds does it atomically create a new tag at the built TBot commit, then create a draft release. Existing tags fail instead of being overwritten. If draft creation fails after tag reservation, inspect the run/tag before retrying with a new revision.
-4. A beta-derived public label contains an upstream prerelease suffix; the workflow passes `--prerelease` explicitly so the draft remains a GitHub prerelease. Review the draft, exact source SHAs, all ZIPs and `SHA256SUMS` before publishing it from [our Releases page](https://github.com/sanyo4ever/TBot/releases).
+4. A beta-derived public label contains an upstream prerelease suffix; the workflow passes `--prerelease` explicitly so the draft remains a GitHub prerelease. Review the draft, exact source SHAs, all ZIPs and `SHA256SUMS` before publishing it from [our Releases page](https://github.com/sanyo4ever/TBot-Ronnie/releases).
 
 Every ZIP includes `BUILD-INFO.txt`, exact TBot and Go source SHAs, Go gitlink, public/NuGet/numeric versions, platform and toolchain versions, plus `fork-version.json`. Ordinary pushes, PRs and upstream tags do not create releases. Build success and synthetic tests do not certify current live-game behavior. Do not describe a planned check as completed in release notes.
 

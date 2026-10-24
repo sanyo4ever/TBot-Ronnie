@@ -5,8 +5,8 @@ OGame Bot — sanyo4ever maintenance fork, based on [Ronnie's TBot](https://gith
 
 Our current line starts from Ronnie's **v3.5.1-beta2**, with reviewed stability fixes carried forward from our previous maintenance line. The first revision is **3.5.1-beta2a**, still a prerelease. We retain the work and attribution of Ronnie, [0xE232FE](https://github.com/0xE232FE/TBot), [Cheeeh](https://github.com/Cheeeh/TBot) and the original contributors. The pinned backend is [our ogame.mod fork](https://github.com/sanyo4ever/ogame.mod), based on Ronnie's release backend.
 
-[![Fork CI](https://github.com/sanyo4ever/TBot/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/sanyo4ever/TBot/actions/workflows/build.yml)
-[Releases and checksums](https://github.com/sanyo4ever/TBot/releases) · [Maintenance and release guide](docs/FORK.md)
+[![Fork CI](https://github.com/sanyo4ever/TBot-Ronnie/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/sanyo4ever/TBot-Ronnie/actions/workflows/build.yml)
+[Releases and checksums](https://github.com/sanyo4ever/TBot-Ronnie/releases) · [Maintenance and release guide](docs/FORK.md)
 
 TBot is an [OGame](https://lobby.ogame.gameforge.com/) bot using [ogamed](https://github.com/alaingilbert/ogame) by alaingilbert. Our source targets **.NET 10**; release ZIPs contain the runtime. See [Building](#building).
 
@@ -215,7 +215,7 @@ You can change settings from WebUI or editing the files directly.
 ## Running on Linux/MacOS
 * Open a terminal (if you are in a desktop environment)
 * Download latest release for your platform.
-  * Download the matching ZIP from [our Releases page](https://github.com/sanyo4ever/TBot/releases). A fork tag such as `3.5.1-beta2a` has packages named `TBot-3.5.1-beta2a-PLATFORM.zip`.
+  * Download the matching ZIP from [our Releases page](https://github.com/sanyo4ever/TBot-Ronnie/releases). A fork tag such as `3.5.1-beta2a` has packages named `TBot-3.5.1-beta2a-PLATFORM.zip`.
 * Unzip the downloaded file
   * `unzip TBot-VERSION-PLATFORM.zip -d TBot` (*change the filename to your real one!*)
 * Make ogamed executable (*this is only required on first run or update*)
@@ -280,8 +280,8 @@ Also, a proper documentation about how to deal with settings would no doubt be h
 Use a stable .NET 10 SDK selected by `global.json`, Git and the Go toolchain specified in `ogame/go.mod`. Ronnie's upstream release targets .NET 9; our toolchain policy is a separate fork layer.
 
 ```sh
-git clone --recurse-submodules --branch main https://github.com/sanyo4ever/TBot.git
-cd TBot
+git clone --recurse-submodules --branch main https://github.com/sanyo4ever/TBot-Ronnie.git
+cd TBot-Ronnie
 dotnet test TBot.sln -c Release
 cd ogame
 go test -count=1 ./...

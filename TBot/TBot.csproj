@@ -10,8 +10,8 @@
     <Platforms>AnyCPU;x64;x86</Platforms>
     <Copyright>2026 © TBot</Copyright>
     <PackageLicenseExpression>https://licenses.nuget.org/MIT</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/sanyo4ever/TBot</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/sanyo4ever/TBot</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/sanyo4ever/TBot-Ronnie</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/sanyo4ever/TBot-Ronnie</RepositoryUrl>
 		<AssemblyVersion>3.5.1</AssemblyVersion>
 		<FileVersion>3.5.1</FileVersion>
     <Description>OGame Bot</Description>
