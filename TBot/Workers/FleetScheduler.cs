@@ -1710,7 +1710,7 @@ if (fleet == null) return;
 					List<Celestial> celestialsToExclude = _calcService.ParseCelestialsList(_tbotInstance.InstanceSettings.Brain.AutoRepatriate.Exclude, _tbotInstance.UserData.celestials);
 					List<Celestial> celestialList = _tbotInstance.UserData.celestials.ToList();
 					
-					celestialList = (bool) _tbotInstance.InstanceSettings.Brain.AutoRepatriate.RandomOrder ? celestialList.Shuffle().ToList() : celestialList.ToList();
+					celestialList = (bool) _tbotInstance.InstanceSettings.Brain.AutoRepatriate.RandomOrder ? Tbot.Includes.Extensions.Shuffle(celestialList).ToList() : celestialList.ToList();
 					
 					foreach (Celestial celestial in celestialList) {
 						List<Celestial> closestCelestials = tempCelestials

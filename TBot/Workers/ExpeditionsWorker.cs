@@ -334,7 +334,7 @@ namespace Tbot.Workers {
 				var planningStart = _nextOriginIndex;
 				var selectionOrder = Enumerable.Range(0, origins.Count).ToList();
 				if ((bool)_tbotInstance.InstanceSettings.Expeditions.RandomizeOrder)
-					selectionOrder = selectionOrder.Shuffle().ToList();
+					selectionOrder = Tbot.Includes.Extensions.Shuffle(selectionOrder).ToList();
 				var dispatchPlanner = new ExpeditionDispatchPlanner(activeExpeditions, maxPerOrigin, planningStart, selectionOrder);
 				var random = new Random();
 				var usedSystems = new List<int>();

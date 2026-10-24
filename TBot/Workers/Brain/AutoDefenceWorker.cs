@@ -51,7 +51,7 @@ namespace Tbot.Workers.Brain {
 					(long) _tbotInstance.InstanceSettings.Brain.AutoDefence.DefenceToReach.AntiBallisticMissiles,
 					(long) _tbotInstance.InstanceSettings.Brain.AutoDefence.DefenceToReach.InterplanetaryMissiles
 				);
-				foreach (Celestial celestial in (bool) _tbotInstance.InstanceSettings.Brain.AutoDefence.RandomOrder ? _tbotInstance.UserData.celestials.Shuffle().ToList() : _tbotInstance.UserData.celestials) {
+				foreach (Celestial celestial in (bool) _tbotInstance.InstanceSettings.Brain.AutoDefence.RandomOrder ? Tbot.Includes.Extensions.Shuffle(_tbotInstance.UserData.celestials).ToList() : _tbotInstance.UserData.celestials) {
 					if (celestialsToExclude.Has(celestial)) {
 						DoLog(LogLevel.Information, $"Skipping {celestial.ToString()}: celestial in exclude list.");
 						continue;

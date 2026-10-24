@@ -40,7 +40,7 @@ namespace Tbot.Workers.Brain {
 				List<Celestial> newCelestials = _tbotInstance.UserData.celestials.ToList();
 				List<Celestial> celestialsToExclude = _calculationService.ParseCelestialsList(_tbotInstance.InstanceSettings.Brain.AutoCargo.Exclude, _tbotInstance.UserData.celestials);
 
-				foreach (Celestial celestial in (bool) _tbotInstance.InstanceSettings.Brain.AutoCargo.RandomOrder ? _tbotInstance.UserData.celestials.Shuffle().ToList() : _tbotInstance.UserData.celestials) {
+				foreach (Celestial celestial in (bool) _tbotInstance.InstanceSettings.Brain.AutoCargo.RandomOrder ? Tbot.Includes.Extensions.Shuffle(_tbotInstance.UserData.celestials).ToList() : _tbotInstance.UserData.celestials) {
 					if (celestialsToExclude.Has(celestial)) {
 						DoLog(LogLevel.Information, $"Skipping {celestial.ToString()}: celestial in exclude list.");
 						continue;

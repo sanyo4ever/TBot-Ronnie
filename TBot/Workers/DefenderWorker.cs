@@ -165,7 +165,7 @@ namespace Tbot.Workers {
 					celestial = await _tbotOgameBridge.UpdatePlanet(celestial, UpdateTypes.Defences);
 				}
 			} else {
-				randomCelestial = _tbotInstance.UserData.celestials.Shuffle().FirstOrDefault() ?? new() { ID = 0 };
+				randomCelestial = Tbot.Includes.Extensions.Shuffle(_tbotInstance.UserData.celestials).FirstOrDefault() ?? new() { ID = 0 };
 
 				if (randomCelestial.ID != 0) {
 					DoLog(LogLevel.Information, $"Check from Random Celestial");
@@ -367,7 +367,7 @@ namespace Tbot.Workers {
 					if (attack.AttackerID != 0) {
 						Random random = new();
 						string[] messages = _tbotInstance.InstanceSettings.Defender.MessageAttacker.Messages;
-						string message = messages.ToList().Shuffle().First();
+						string message = Tbot.Includes.Extensions.Shuffle(messages.ToList()).First();
 						DoLog(LogLevel.Information, $"Sending message \"{message}\" to attacker {attack.AttackerName}");
 						try {
 							await _ogameService.SendMessage(attack.AttackerID, message);

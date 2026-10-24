@@ -1,0 +1,8 @@
+{
+  "upstream_repository": "ronnie32/TBot",
+  "upstream_release": "3.5.1-beta2",
+  "upstream_release_commit": "521f43f3bb56aa01f847a6b56a89e46b774e0016",
+  "upstream_source_branch": "fix/ogame-v13-tbot-3.4.7",
+  "upstream_source_commit": "521f43f3bb56aa01f847a6b56a89e46b774e0016",
+  "revision": "a"
+}

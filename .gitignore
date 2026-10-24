@@ -353,3 +353,7 @@ data/
 /live-*/
 /build-*/
 /release-build-*/
+
+# Local Python tooling bytecode
+__pycache__/
+*.py[cod]

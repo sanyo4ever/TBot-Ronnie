@@ -181,7 +181,7 @@ namespace Tbot.Workers.Brain {
 
 				var dueTime = TimeSpan.Zero;
 				Task previousExecution = Task.CompletedTask;
-				foreach (Celestial celestial in (bool) _tbotInstance.InstanceSettings.Brain.AutoMine.RandomOrder ? celestialsToMine.Shuffle().ToList() : celestialsToMine) {
+				foreach (Celestial celestial in (bool) _tbotInstance.InstanceSettings.Brain.AutoMine.RandomOrder ? Tbot.Includes.Extensions.Shuffle(celestialsToMine).ToList() : celestialsToMine) {
 					if (celestialsToExclude.Has(celestial)) {
 						DoLog(LogLevel.Information, $"Skipping {celestial.ToString()}: celestial in exclude list.");
 						continue;
