@@ -3,7 +3,7 @@
 # TBot
 OGame Bot — sanyo4ever maintenance fork, based on [Ronnie's TBot](https://github.com/ronnie32/TBot).
 
-Our current line starts from Ronnie's **v3.5.1-beta2**, with reviewed stability fixes carried forward from our previous maintenance line. The first revision is **3.5.1-beta2a**, still a prerelease. We retain the work and attribution of Ronnie, [0xE232FE](https://github.com/0xE232FE/TBot), [Cheeeh](https://github.com/Cheeeh/TBot) and the original contributors. The pinned backend is [our ogame.mod fork](https://github.com/sanyo4ever/ogame.mod), based on Ronnie's release backend.
+Our current line starts from Ronnie's **v3.5.1-beta2**, with reviewed stability fixes carried forward from our previous maintenance line. The current revision is **3.5.1-beta2b**, still a prerelease; it restores primary ship sharing between pending expeditions from each origin. We retain the work and attribution of Ronnie, [0xE232FE](https://github.com/0xE232FE/TBot), [Cheeeh](https://github.com/Cheeeh/TBot) and the original contributors. The pinned backend is [our ogame.mod fork](https://github.com/sanyo4ever/ogame.mod), based on Ronnie's release backend.
 
 [![Fork CI](https://github.com/sanyo4ever/TBot-Ronnie/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/sanyo4ever/TBot-Ronnie/actions/workflows/build.yml)
 [Releases and checksums](https://github.com/sanyo4ever/TBot-Ronnie/releases) · [Maintenance and release guide](docs/FORK.md)
