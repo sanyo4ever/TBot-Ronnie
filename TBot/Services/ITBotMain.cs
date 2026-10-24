@@ -9,6 +9,7 @@ using TBot.Common.Logging;
 using TBot.Ogame.Infrastructure;
 using TBot.Ogame.Infrastructure.Enums;
 using TBot.Ogame.Infrastructure.Models;
+using TBot.Model;
 
 namespace Tbot.Services {
 	public interface ITBotMain {
@@ -30,6 +31,7 @@ namespace Tbot.Services {
 		Task StopFeature(Feature feat);
 		bool IsFeatureRunning(Feature feat);
 		Task SendTelegramMessage(string fmt);
+		Task SendFeatureNotification(dynamic featureSettings, string fmt, NotificationKind kind = NotificationKind.Information);
 		Task<bool> TelegramSwitch(decimal speed, Celestial attacked = null, bool fromTelegram = false);
 		Task SleepNow(DateTime WakeUpTime);
 		Task ListProfiles();

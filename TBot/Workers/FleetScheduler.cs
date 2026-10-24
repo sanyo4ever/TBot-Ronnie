@@ -17,10 +17,49 @@ using System.Globalization;
 using TBot.Ogame.Infrastructure;
 using Tbot.Common.Settings;
 using System.Numerics;
+using TBot.Ogame.Infrastructure.Exceptions;
+using System.Net;
 
 namespace Tbot.Workers {
-	public class FleetScheduler : IFleetScheduler {
+	public class FleetScheduler : IFleetScheduler, IFleetSnapshotProvider {
 		private readonly object _fleetLock = new();
+		private readonly SemaphoreSlim _dispatchSemaphore = new(1, 1);
+		private volatile bool _lastFleetSnapshotWasFresh;
+		private int _priorityDispatchWaiters;
+		// No server idempotency key exists. Keep uncertain actions blocked for this
+		// process rather than allowing the next worker cycle to replay them.
+		private readonly Dictionary<string, (HashSet<int> KnownFleetIds, Ships Ships)> _ambiguousDispatches = new();
+		private readonly HashSet<string> _uncertainDiscoveryPositions = new();
+		private static string DiscoveryKey(Coordinate coordinate) => $"{coordinate.Galaxy}:{coordinate.System}:{coordinate.Position}";
+
+		private async Task RefreshUncertainDiscoverySnapshot() {
+			// The ordinary Fleet DTO cannot prove the strict discovery movement
+			// fields used by Go. Refresh accounting, but keep the guard until a
+			// process restart rather than weakening that evidence boundary.
+			try {
+				var fleets = await _ogameService.GetFleets();
+				if (fleets != null) {
+					lock (_fleetLock) _tbotInstance.UserData.fleets = fleets.Where(fleet => fleet != null).ToList();
+				}
+			} catch (Exception e) {
+				_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler, $"Uncertain discovery movement refresh failed: {e.Message}");
+			}
+		}
+
+
+		private async Task EnterDispatchGate(bool priority = false) {
+			if (priority) Interlocked.Increment(ref _priorityDispatchWaiters);
+			try {
+				while (true) {
+					await _dispatchSemaphore.WaitAsync();
+					if (priority || Volatile.Read(ref _priorityDispatchWaiters) == 0) return;
+					_dispatchSemaphore.Release();
+					await Task.Yield();
+				}
+			} finally {
+				if (priority) Interlocked.Decrement(ref _priorityDispatchWaiters);
+			}
+		}
 		private ITBotMain _tbotInstance = null;
 		private ITBotOgamedBridge _tbotOgameBridge;
 		private readonly IOgameService _ogameService;
@@ -150,7 +189,24 @@ namespace Tbot.Workers {
 
                                return;
                             }
-		public async Task AutoFleetSave(Celestial celestial, bool isSleepTimeFleetSave = false, long minDuration = 0, bool WaitFleetsReturn = false, Missions TelegramMission = Missions.None, bool fromTelegram = false, bool saveall = false) {
+		public Task AutoFleetSave(Celestial celestial, bool isSleepTimeFleetSave = false, long minDuration = 0, bool WaitFleetsReturn = false, Missions TelegramMission = Missions.None, bool fromTelegram = false, bool saveall = false) =>
+			AutoFleetSaveCore(celestial, isSleepTimeFleetSave, minDuration, WaitFleetsReturn, TelegramMission, fromTelegram, saveall);
+
+		// Reports only a dispatch confirmed during this save. Shared movement
+		// snapshots and a prior caller's reconciled request cannot confer ownership.
+		public async Task<int?> AutoFleetSaveWithResult(Celestial celestial, long minDuration = 0) {
+			int? confirmedFleetId = null;
+			try {
+				await AutoFleetSaveCore(celestial, minDuration: minDuration,
+					onConfirmedFleet: id => confirmedFleetId = id);
+			} catch (Exception e) when (confirmedFleetId.HasValue) {
+				_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler,
+					$"Fleet {confirmedFleetId} was confirmed, but fleet-save follow-up failed: {e.Message}");
+			}
+			return confirmedFleetId;
+		}
+
+		private async Task AutoFleetSaveCore(Celestial celestial, bool isSleepTimeFleetSave = false, long minDuration = 0, bool WaitFleetsReturn = false, Missions TelegramMission = Missions.None, bool fromTelegram = false, bool saveall = false, Action<int> onConfirmedFleet = null) {
 			DateTime departureTime = await _tbotOgameBridge.GetDateTime();
 			_tbotInstance.SleepDuration = minDuration;
 
@@ -272,7 +328,8 @@ namespace Tbot.Workers {
 				foreach (FleetHypotesis fleet in fleetHypotesis.OrderBy(pf => pf.Fuel).ThenBy(pf => pf.Duration <= minDuration)) {
 					_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler, $"checking {mission} fleet to: {fleet.Destination}");
 					if (CheckFuel(fleet, celestial)) {
-						fleetId = await SendFleet(fleet.Origin, fleet.Ships, fleet.Destination, fleet.Mission, fleet.Speed, payload, _tbotInstance.UserData.userInfo.Class, true);
+						fleetId = await DispatchFleet(fleet.Origin, fleet.Ships, fleet.Destination, fleet.Mission, fleet.Speed, payload, _tbotInstance.UserData.userInfo.Class, force: true, validateShips: false, reduceExpeditionPayload: false, onConfirmedFleet: onConfirmedFleet);
+						if (fleetId == (int)SendFleetCode.AmbiguousDispatch) return;
 
 						if (fleetId != (int)SendFleetCode.GenericError &&
     fleetId != (int)SendFleetCode.AfterSleepTime &&
@@ -302,7 +359,8 @@ namespace Tbot.Workers {
 					foreach (FleetHypotesis fleet in fleetHypotesis.OrderBy(pf => pf.Fuel).ThenBy(pf => pf.Duration <= minDuration)) {
 						_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler, $"checking {mission} fleet to: {fleet.Destination}");
 						if (CheckFuel(fleet, celestial)) {
-							fleetId = await SendFleet(fleet.Origin, fleet.Ships, fleet.Destination, fleet.Mission, fleet.Speed, payload, _tbotInstance.UserData.userInfo.Class, true);
+							fleetId = await DispatchFleet(fleet.Origin, fleet.Ships, fleet.Destination, fleet.Mission, fleet.Speed, payload, _tbotInstance.UserData.userInfo.Class, force: true, validateShips: false, reduceExpeditionPayload: false, onConfirmedFleet: onConfirmedFleet);
+						if (fleetId == (int)SendFleetCode.AmbiguousDispatch) return;
 
 							if (fleetId != (int)SendFleetCode.GenericError &&
     fleetId != (int)SendFleetCode.AfterSleepTime &&
@@ -324,7 +382,8 @@ namespace Tbot.Workers {
 					foreach (FleetHypotesis fleet in fleetHypotesis.OrderBy(pf => pf.Fuel).ThenBy(pf => pf.Duration <= minDuration)) {
 						_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler, $"checking {mission} fleet to: {fleet.Destination}");
 						if (CheckFuel(fleet, celestial)) {
-							fleetId = await SendFleet(fleet.Origin, fleet.Ships, fleet.Destination, fleet.Mission, fleet.Speed, payload, _tbotInstance.UserData.userInfo.Class, true);
+							fleetId = await DispatchFleet(fleet.Origin, fleet.Ships, fleet.Destination, fleet.Mission, fleet.Speed, payload, _tbotInstance.UserData.userInfo.Class, force: true, validateShips: false, reduceExpeditionPayload: false, onConfirmedFleet: onConfirmedFleet);
+						if (fleetId == (int)SendFleetCode.AmbiguousDispatch) return;
 
 							if (fleetId != (int)SendFleetCode.GenericError &&
     fleetId != (int)SendFleetCode.AfterSleepTime &&
@@ -348,7 +407,8 @@ namespace Tbot.Workers {
 					foreach (FleetHypotesis fleet in fleetHypotesis.OrderBy(pf => pf.Fuel).ThenBy(pf => pf.Duration <= minDuration)) {
 						_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler, $"checking {mission} fleet to: {fleet.Destination}");
 						if (CheckFuel(fleet, celestial)) {
-							fleetId = await SendFleet(fleet.Origin, fleet.Ships, fleet.Destination, fleet.Mission, fleet.Speed, payload, _tbotInstance.UserData.userInfo.Class, true);
+							fleetId = await DispatchFleet(fleet.Origin, fleet.Ships, fleet.Destination, fleet.Mission, fleet.Speed, payload, _tbotInstance.UserData.userInfo.Class, force: true, validateShips: false, reduceExpeditionPayload: false, onConfirmedFleet: onConfirmedFleet);
+						if (fleetId == (int)SendFleetCode.AmbiguousDispatch) return;
 
 							if (fleetId != (int)SendFleetCode.GenericError &&
     fleetId != (int)SendFleetCode.AfterSleepTime &&
@@ -372,7 +432,8 @@ namespace Tbot.Workers {
 					foreach (FleetHypotesis fleet in fleetHypotesis.OrderBy(pf => pf.Fuel).ThenBy(pf => pf.Duration <= minDuration)) {
 						_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler, $"checking {mission} fleet to: {fleet.Destination}");
 						if (CheckFuel(fleet, celestial)) {
-							fleetId = await SendFleet(fleet.Origin, fleet.Ships, fleet.Destination, fleet.Mission, fleet.Speed, payload, _tbotInstance.UserData.userInfo.Class, true);
+							fleetId = await DispatchFleet(fleet.Origin, fleet.Ships, fleet.Destination, fleet.Mission, fleet.Speed, payload, _tbotInstance.UserData.userInfo.Class, force: true, validateShips: false, reduceExpeditionPayload: false, onConfirmedFleet: onConfirmedFleet);
+						if (fleetId == (int)SendFleetCode.AmbiguousDispatch) return;
 
 							if (fleetId != (int)SendFleetCode.GenericError &&
     fleetId != (int)SendFleetCode.AfterSleepTime &&
@@ -439,13 +500,188 @@ if (fleet == null) return;
     }
 }
 		}
-		public async Task<int> SendFleet(Celestial origin, Ships ships, Coordinate destination, Missions mission, decimal speed, Resources payload = null, CharacterClass playerClass = CharacterClass.NoClass, bool force = false) {
-			_tbotInstance.log(LogLevel.Information, LogSender.FleetScheduler, $"Sending fleet from {origin.Coordinate.ToString()} to {destination.ToString()}. Mission: {mission.ToString()}. Speed: {(speed * 10).ToString()}% Ships: {ships.ToString()}");
+		public Task<int> SendFleet(Celestial origin, Ships ships, Coordinate destination, Missions mission, decimal speed, Resources payload = null, CharacterClass playerClass = CharacterClass.NoClass, bool force = false) {
+			return DispatchFleet(origin, ships, destination, mission, speed, payload, playerClass, force, validateShips: false, reduceExpeditionPayload: false);
+		}
+
+		public Task<int> SendValidatedFleet(Celestial origin, Ships ships, Coordinate destination, Missions mission, decimal speed, Resources payload = null, CharacterClass playerClass = CharacterClass.NoClass, bool force = false) {
+			return DispatchFleet(origin, ships, destination, mission, speed, payload, playerClass, force, validateShips: true, reduceExpeditionPayload: false);
+		}
+
+		public Task<int> SendExpedition(Celestial origin, Ships ships, Coordinate destination, decimal speed, Resources payload = null, CharacterClass playerClass = CharacterClass.NoClass) {
+			return DispatchFleet(origin, ships, destination, Missions.Expedition, speed, payload, playerClass, force: false, validateShips: true, reduceExpeditionPayload: true);
+		}
+
+		/// <summary>
+		/// Sends a lifeform discovery through the same per-account dispatch gate as
+		/// every other state-changing fleet action. The discovery endpoint builds the
+		/// fleet itself, so it cannot use DispatchFleet's ship validation pipeline.
+		/// </summary>
+		public async Task<DiscoveryDispatchResult> SendDiscovery(Celestial origin, Coordinate destination) {
+			await EnterDispatchGate();
+			try {
+				if (origin?.Coordinate == null || destination == null)
+					return new DiscoveryDispatchResult(DiscoveryDispatchStatus.Failed, "origin or destination is invalid");
+
+				bool requested = false;
+				try {
+					// The slot snapshot is part of the dispatch decision. It must be
+					// refreshed while the account-wide dispatch gate is held so another
+					// worker cannot consume the observed slot between the check and POST.
+					_tbotInstance.UserData.slots = await _tbotOgameBridge.UpdateSlots();
+					int slotsToLeaveFree = (int)_tbotInstance.InstanceSettings.General.SlotsToLeaveFree;
+					if (_tbotInstance.UserData.slots == null ||
+						_tbotInstance.UserData.slots.Free <= slotsToLeaveFree) {
+						var result = new DiscoveryDispatchResult(
+							DiscoveryDispatchStatus.NoSlots,
+							$"only {_tbotInstance.UserData.slots?.Free ?? 0} fleet slot(s) available; {slotsToLeaveFree} reserved");
+						_tbotInstance.log(LogLevel.Information, LogSender.FleetScheduler,
+							$"Discovery not sent from {origin.Coordinate}: {result.Message}.");
+						return result;
+					}
+
+					if (_uncertainDiscoveryPositions.Contains(DiscoveryKey(destination))) {
+						await RefreshUncertainDiscoverySnapshot();
+						return new(DiscoveryDispatchStatus.Failed, "an earlier discovery at this position is still uncertain; no action was repeated");
+					}
+					requested = true;
+					var sent = await _ogameService.SendDiscovery(origin, destination);
+					if (!sent) {
+						_uncertainDiscoveryPositions.Add(DiscoveryKey(destination));
+						var result = new DiscoveryDispatchResult(
+							DiscoveryDispatchStatus.Rejected,
+							"OGame returned an unsuccessful discovery response");
+						_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler,
+							$"Discovery rejected from {origin.Coordinate} to {destination}: {result.Message}.");
+						return result;
+					}
+
+					// A successful action is confirmed by the wrapper. Refreshing the
+					// local snapshot is useful for the next worker, but a refresh failure
+					// must not turn an already accepted game action into a retryable error.
+					try {
+						_tbotInstance.UserData.slots = await _tbotOgameBridge.UpdateSlots();
+					} catch (Exception refreshException) {
+						_tbotInstance.log(LogLevel.Debug, LogSender.FleetScheduler,
+							$"Discovery was accepted, but slot refresh failed: {refreshException.Message}");
+					}
+
+					return new DiscoveryDispatchResult(DiscoveryDispatchStatus.Sent, "discovery fleet accepted by OGame");
+				} catch (Exception e) {
+					if (requested) _uncertainDiscoveryPositions.Add(DiscoveryKey(destination));
+					_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler,
+						$"Unable to send discovery fleet from {origin.Coordinate} to {destination}: {e.Message}");
+					return ClassifyDiscoveryDispatchException(e);
+				}
+			} finally {
+				_dispatchSemaphore.Release();
+			}
+		}
+
+		// The historical count-only API cannot reserve exact coordinates. Keep its
+		// source contract, but require an explicit reservation before any action.
+		public Task<DiscoverySystemDispatchResult> SendSystemDiscovery(Celestial origin, int galaxy, int system, int expectedFleetCount) =>
+			SendSystemDiscovery(origin, galaxy, system, expectedFleetCount, null);
+
+		public async Task<DiscoverySystemDispatchResult> SendSystemDiscovery(Celestial origin, int galaxy, int system, int expectedFleetCount, IReadOnlyList<int> positions) {
+			if (origin?.Coordinate == null || galaxy <= 0 || system <= 0 || expectedFleetCount <= 0 || expectedFleetCount > 15 ||
+				positions == null || positions.Count != expectedFleetCount || positions.Distinct().Count() != positions.Count ||
+				positions.Any(position => position < 1 || position > 15))
+				return new(DiscoveryDispatchStatus.Failed, message: "an exact valid discovery reservation is required");
+
+			var confirmed = new List<Coordinate>();
+			// The worker still plans a system as one batch. Each bridge request is
+			// bounded to one launch, so a queued Defender may run between targets.
+			foreach (var position in positions) {
+				await EnterDispatchGate();
+				var destination = new Coordinate(galaxy, system, position, Celestials.Planet);
+				bool requested = false;
+				try {
+					_tbotInstance.UserData.slots = await _tbotOgameBridge.UpdateSlots();
+					int reserved = (int)_tbotInstance.InstanceSettings.General.SlotsToLeaveFree;
+					int usable = Math.Max(0, (_tbotInstance.UserData.slots?.Free ?? 0) - reserved);
+					int needed = confirmed.Count == 0 ? expectedFleetCount : 1;
+					if (usable < needed)
+						return new(DiscoveryDispatchStatus.NoSlots, confirmed, $"only {usable} fleet slot(s) available for the reserved discoveries");
+					if (_uncertainDiscoveryPositions.Contains(DiscoveryKey(destination))) {
+						await RefreshUncertainDiscoverySnapshot();
+						return new(DiscoveryDispatchStatus.Failed, confirmed, "an earlier discovery at this position is still uncertain; no action was repeated");
+					}
+					requested = true;
+					var result = await _ogameService.SendBoundedSystemDiscovery(origin, galaxy, system, 1, new[] { position });
+					var coordinates = result?.Coordinates;
+					if (coordinates == null || coordinates.Count > 1 || coordinates.Any(c =>
+						c == null || c.Type != Celestials.Planet || c.Galaxy != galaxy || c.System != system || c.Position != position)) {
+						_uncertainDiscoveryPositions.Add(DiscoveryKey(destination));
+						return new(DiscoveryDispatchStatus.Failed, confirmed, "invalid bounded discovery movement evidence");
+					}
+					confirmed.AddRange(coordinates);
+					if (coordinates.Count == 0) _uncertainDiscoveryPositions.Add(DiscoveryKey(destination));
+					if (!result.Complete || coordinates.Count != 1)
+						return new(DiscoveryDispatchStatus.Failed, confirmed, result.Error ?? "bounded discovery stopped before its reserved position was confirmed");
+				} catch (Exception e) {
+					if (requested) _uncertainDiscoveryPositions.Add(DiscoveryKey(destination));
+					return new(ClassifyDiscoveryDispatchException(e).Status, confirmed, e.GetBaseException().Message);
+			} finally {
+				_dispatchSemaphore.Release();
+			}
+			}
+			return new(DiscoveryDispatchStatus.Sent, confirmed, $"{confirmed.Count} discovery fleets confirmed");
+		}
+
+		private static DiscoveryDispatchResult ClassifyDiscoveryDispatchException(Exception exception) {
+			var message = exception?.GetBaseException()?.Message?.Trim();
+			if (string.IsNullOrWhiteSpace(message))
+				message = "unknown discovery dispatch error";
+
+			if (message.Contains("code 100", StringComparison.OrdinalIgnoreCase) ||
+				message.Contains("still processing", StringComparison.OrdinalIgnoreCase) ||
+				message.Contains("previous request", StringComparison.OrdinalIgnoreCase))
+				return new DiscoveryDispatchResult(DiscoveryDispatchStatus.RequestPending, message);
+
+			if (message.Contains("not logged", StringComparison.OrdinalIgnoreCase) ||
+				message.Contains("logged out", StringComparison.OrdinalIgnoreCase) ||
+				message.Contains("login", StringComparison.OrdinalIgnoreCase))
+				return new DiscoveryDispatchResult(DiscoveryDispatchStatus.SessionExpired, message);
+
+			if (message.Contains("no ships", StringComparison.OrdinalIgnoreCase) ||
+				message.Contains("not enough ships", StringComparison.OrdinalIgnoreCase) ||
+				message.Contains("no pathfinder", StringComparison.OrdinalIgnoreCase) ||
+				message.Contains("not enough pathfinder", StringComparison.OrdinalIgnoreCase))
+				return new DiscoveryDispatchResult(DiscoveryDispatchStatus.NoShips, message);
+
+			if (message.Contains("slot", StringComparison.OrdinalIgnoreCase) ||
+				message.Contains("maximum number of fleets", StringComparison.OrdinalIgnoreCase))
+				return new DiscoveryDispatchResult(DiscoveryDispatchStatus.NoSlots, message);
+
+			if (message.Contains("position", StringComparison.OrdinalIgnoreCase) ||
+				message.Contains("target is not present", StringComparison.OrdinalIgnoreCase) ||
+				message.Contains("not available", StringComparison.OrdinalIgnoreCase) ||
+				message.Contains("cooldown", StringComparison.OrdinalIgnoreCase) ||
+				message.Contains("can't send discovery mission", StringComparison.OrdinalIgnoreCase))
+				return new DiscoveryDispatchResult(DiscoveryDispatchStatus.PositionUnavailable, message);
+
+			return new DiscoveryDispatchResult(DiscoveryDispatchStatus.Failed, message);
+		}
+
+		public bool LastFleetSnapshotWasFresh => _lastFleetSnapshotWasFresh;
+
+		private async Task<int> DispatchFleet(Celestial origin, Ships ships, Coordinate destination, Missions mission, decimal speed, Resources payload, CharacterClass playerClass, bool force, bool validateShips, bool reduceExpeditionPayload, Action<int> onConfirmedFleet = null) {
+			await EnterDispatchGate(force);
+			try {
+				return await SendFleetCore(origin, ships, destination, mission, speed, payload, playerClass, force, validateShips, reduceExpeditionPayload, onConfirmedFleet);
+			} finally {
+				_dispatchSemaphore.Release();
+			}
+		}
+
+		private async Task<int> SendFleetCore(Celestial origin, Ships ships, Coordinate destination, Missions mission, decimal speed, Resources payload, CharacterClass playerClass, bool force, bool validateShips, bool reduceExpeditionPayload, Action<int> onConfirmedFleet) {
+			_tbotInstance.log(LogLevel.Information, LogSender.FleetScheduler, $"Sending fleet from {origin.Coordinate.ToString()} to {destination.ToString()}. Mission: {mission.ToString()}. Speed: {(speed * 10).ToString()}% Ships: {ships?.ToString() ?? "none"}");
 
 			if (playerClass == CharacterClass.NoClass)
 				playerClass = _tbotInstance.UserData.userInfo.Class;
 
-			if (!ships.HasMovableFleet()) {
+			if (ships == null || !ships.HasMovableFleet()) {
 				_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler, "Unable to send fleet: there are no ships to send");
 				return (int) SendFleetCode.GenericError;
 			}
@@ -474,94 +710,104 @@ if (fleet == null) return;
 				}
 			}
 
-if (!_calcService.GetValidSpeedsForClass(playerClass).Any(s => s == speed)) {
-    _tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler,
-        "Unable to send fleet: speed not available for your class");
-    return (int)SendFleetCode.GenericError;
-}
+			if (!_calcService.GetValidSpeedsForClass(playerClass).Any(s => s == speed)) {
+				_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler,
+					"Unable to send fleet: speed not available for your class");
+				return (int)SendFleetCode.GenericError;
+			}
 
-origin = await _tbotOgameBridge.UpdatePlanet(origin, UpdateTypes.LFBonuses);
+			origin = await _tbotOgameBridge.UpdatePlanet(origin, UpdateTypes.LFBonuses);
 
-FleetPrediction fleetPrediction = _calcService.CalcFleetPrediction(
-    origin.Coordinate,
-    destination,
-    ships,
-    mission,
-    speed,
-    _tbotInstance.UserData.researches,
-    _tbotInstance.UserData.serverData,
-    origin.LFBonuses,
-    _tbotInstance.UserData.userInfo.Class,
-    _tbotInstance.UserData.allianceClass
-);
+			if (validateShips) {
+				var latestShips = await _ogameService.GetShips(origin);
+				if (latestShips == null || !latestShips.HasAtLeast(ships, 1)) {
+					_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler,
+						$"Unable to send fleet from {origin.Coordinate}: the requested ships are no longer available.");
+					return (int)SendFleetCode.GenericError;
+				}
+				origin.Ships = latestShips;
+			}
 
-_tbotInstance.log(LogLevel.Debug, LogSender.FleetScheduler,
-    $"Calculated flight time (one-way): {TimeSpan.FromSeconds(fleetPrediction.Time)}");
+			FleetPrediction fleetPrediction = _calcService.CalcFleetPrediction(
+				origin.Coordinate,
+				destination,
+				ships,
+				mission,
+				speed,
+				_tbotInstance.UserData.researches,
+				_tbotInstance.UserData.serverData,
+				origin.LFBonuses,
+				_tbotInstance.UserData.userInfo.Class,
+				_tbotInstance.UserData.allianceClass
+			);
 
-var flightTime = mission switch
-{
-    Missions.Deploy => fleetPrediction.Time,
-    Missions.Expedition => (long)Math.Round((double)(2 * fleetPrediction.Time) + 3600, 0, MidpointRounding.ToPositiveInfinity),
-    _ => (long)Math.Round((double)(2 * fleetPrediction.Time), 0, MidpointRounding.ToPositiveInfinity)
-};
-_tbotInstance.log(LogLevel.Debug, LogSender.FleetScheduler,
-    $"Calculated flight time (full trip): {TimeSpan.FromSeconds(flightTime)}");
-_tbotInstance.log(LogLevel.Debug, LogSender.FleetScheduler,
-    $"Calculated flight fuel: {fleetPrediction.Fuel}");
+			_tbotInstance.log(LogLevel.Debug, LogSender.FleetScheduler,
+				$"Calculated flight time (one-way): {TimeSpan.FromSeconds(fleetPrediction.Time)}");
 
-origin = await _tbotOgameBridge.UpdatePlanet(origin, UpdateTypes.Resources);
+			var flightTime = mission switch
+			{
+				Missions.Deploy => fleetPrediction.Time,
+				Missions.Expedition => (long)Math.Round((double)(2 * fleetPrediction.Time) + 3600, 0, MidpointRounding.ToPositiveInfinity),
+				_ => (long)Math.Round((double)(2 * fleetPrediction.Time), 0, MidpointRounding.ToPositiveInfinity)
+			};
+			_tbotInstance.log(LogLevel.Debug, LogSender.FleetScheduler,
+				$"Calculated flight time (full trip): {TimeSpan.FromSeconds(flightTime)}");
+			_tbotInstance.log(LogLevel.Debug, LogSender.FleetScheduler,
+				$"Calculated flight fuel: {fleetPrediction.Fuel}");
 
-if (origin.Resources.Deuterium < fleetPrediction.Fuel) {
-    _tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler,
-        "Unable to send fleet: not enough deuterium!");
-    return (int)SendFleetCode.GenericError;
-}
+			origin = await _tbotOgameBridge.UpdatePlanet(origin, UpdateTypes.Resources);
 
-long fuelCapacity = _calcService.CalcFleetFuelCapacity(
-    ships,
-    _tbotInstance.UserData.serverData,
-    _tbotInstance.UserData.researches.HyperspaceTechnology,
-    _tbotInstance.UserData.userInfo.Class,
-    _tbotInstance.UserData.serverData.ProbeCargo
-);
+			if (origin.Resources.Deuterium < fleetPrediction.Fuel) {
+				_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler,
+					"Unable to send fleet: not enough deuterium!");
+				return (int)SendFleetCode.GenericError;
+			}
 
-if (fuelCapacity != 0 && fuelCapacity < fleetPrediction.Fuel) {
-    _tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler,
-        "Unable to send fleet: ships don't have enough fuel capacity!");
-    return (int)SendFleetCode.GenericError;
-}
+			long fuelCapacity = _calcService.CalcFleetFuelCapacity(
+				ships,
+				_tbotInstance.UserData.serverData,
+				_tbotInstance.UserData.researches.HyperspaceTechnology,
+				_tbotInstance.UserData.userInfo.Class,
+				_tbotInstance.UserData.serverData.ProbeCargo
+			);
 
-bool ignoreSleepForExpeditions =
-    mission == Missions.Expedition &&
-    (bool)_tbotInstance.InstanceSettings.Expeditions.IgnoreSleep;
+			if (fuelCapacity != 0 && fuelCapacity < fleetPrediction.Fuel) {
+				_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler,
+					"Unable to send fleet: ships don't have enough fuel capacity!");
+				return (int)SendFleetCode.GenericError;
+			}
 
-if (
-    (bool)_tbotInstance.InstanceSettings.SleepMode.Active &&
-    DateTime.TryParse((string)_tbotInstance.InstanceSettings.SleepMode.GoToSleep, out DateTime goToSleep) &&
-    DateTime.TryParse((string)_tbotInstance.InstanceSettings.SleepMode.WakeUp, out DateTime wakeUp) &&
-    !force
-)
-{
-    DateTime time = await _tbotOgameBridge.GetDateTime();
+			bool ignoreSleepForExpeditions =
+				mission == Missions.Expedition &&
+				(bool)_tbotInstance.InstanceSettings.Expeditions.IgnoreSleep;
 
-    if (GeneralHelper.ShouldSleep(time, goToSleep, wakeUp)) {
-        _tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler,
-            "Unable to send fleet: bed time has passed");
-        return (int)SendFleetCode.AfterSleepTime;
-    }
+			if (
+				(bool)_tbotInstance.InstanceSettings.SleepMode.Active &&
+				DateTime.TryParse((string)_tbotInstance.InstanceSettings.SleepMode.GoToSleep, out DateTime goToSleep) &&
+				DateTime.TryParse((string)_tbotInstance.InstanceSettings.SleepMode.WakeUp, out DateTime wakeUp) &&
+				!force
+			)
+			{
+				DateTime time = await _tbotOgameBridge.GetDateTime();
 
-    if (goToSleep >= wakeUp) wakeUp = wakeUp.AddDays(1);
-    if (goToSleep < time) goToSleep = goToSleep.AddDays(1);
-    if (wakeUp < time) wakeUp = wakeUp.AddDays(1);
+				if (GeneralHelper.ShouldSleep(time, goToSleep, wakeUp)) {
+					_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler,
+						"Unable to send fleet: bed time has passed");
+					return (int)SendFleetCode.AfterSleepTime;
+				}
 
-    DateTime returnTime = time.AddSeconds(flightTime);
+				if (goToSleep >= wakeUp) wakeUp = wakeUp.AddDays(1);
+				if (goToSleep < time) goToSleep = goToSleep.AddDays(1);
+				if (wakeUp < time) wakeUp = wakeUp.AddDays(1);
 
-    if (returnTime >= goToSleep && returnTime <= wakeUp && !ignoreSleepForExpeditions) {
-        _tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler,
-            "Unable to send fleet: it would come back during sleep time");
-        return (int)SendFleetCode.AfterSleepTime;
-    }
-}
+				DateTime returnTime = time.AddSeconds(flightTime);
+
+				if (returnTime >= goToSleep && returnTime <= wakeUp && !ignoreSleepForExpeditions) {
+					_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler,
+						"Unable to send fleet: it would come back during sleep time");
+					return (int)SendFleetCode.AfterSleepTime;
+				}
+			}
 			_tbotInstance.UserData.slots = await _tbotOgameBridge.UpdateSlots();
 			int slotsToLeaveFree = (int) _tbotInstance.InstanceSettings.General.SlotsToLeaveFree;
 			if (_tbotInstance.UserData.slots.Free == 0) {
@@ -570,6 +816,26 @@ if (
 			} else if (_tbotInstance.UserData.slots.Free > slotsToLeaveFree || force) {
 				if (payload == null)
 					payload = new();
+				var dispatchKey = $"{origin.ID}|{destination.Galaxy}:{destination.System}:{destination.Position}:{destination.Type}|{mission}";
+				if (_ambiguousDispatches.TryGetValue(dispatchKey, out var uncertainKnownIds)) {
+					var reconciled = await TryReconcileAmbiguousDispatch(uncertainKnownIds.KnownFleetIds, origin, uncertainKnownIds.Ships, destination, mission);
+					if (reconciled == null) {
+						_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler,
+							$"An earlier dispatch from {origin.Coordinate} to {destination} is still uncertain; no new fleet request was sent.");
+						return (int)SendFleetCode.AmbiguousDispatch;
+					}
+					_ambiguousDispatches.Remove(dispatchKey);
+					lock (_fleetLock) _tbotInstance.UserData.fleets = FleetSnapshotPolicy.AddDispatchedFleet(_tbotInstance.UserData.fleets, reconciled);
+					return reconciled.ID;
+				}
+				HashSet<int> knownFleetIds = null;
+				try {
+					var beforeSend = await _ogameService.GetFleets();
+					if (beforeSend != null) knownFleetIds = beforeSend.Where(fleet => fleet != null).Select(fleet => fleet.ID).ToHashSet();
+				} catch (Exception snapshotException) {
+					_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler, $"Pre-dispatch movement snapshot failed: {snapshotException.Message}");
+				}
+				var requestedShips = Newtonsoft.Json.JsonConvert.DeserializeObject<Ships>(Newtonsoft.Json.JsonConvert.SerializeObject(ships));
 				try {
 					if (payload.Metal < 0)
 						payload.Metal = 0;
@@ -579,23 +845,101 @@ if (
 						payload.Deuterium = 0;
 					if (payload.Food < 0)
 						payload.Food = 0;
+
+					if (reduceExpeditionPayload && mission == Missions.Expedition) {
+						var cargoCapacity = _calcService.CalcFleetCapacity(
+							ships,
+							_tbotInstance.UserData.serverData,
+							_tbotInstance.UserData.researches.HyperspaceTechnology,
+							origin.LFBonuses,
+							_tbotInstance.UserData.userInfo.Class,
+							_tbotInstance.UserData.serverData.ProbeCargo);
+						var requestedPayload = payload.Deuterium;
+						payload.Deuterium = ExpeditionPayloadPolicy.GetDeuteriumPayload(
+							requestedPayload,
+							origin.Resources.Deuterium,
+							fleetPrediction.Fuel,
+							cargoCapacity);
+						if (payload.Deuterium != requestedPayload) {
+							_tbotInstance.log(LogLevel.Information, LogSender.FleetScheduler,
+								$"Reduced expedition deuterium payload from {requestedPayload} to {payload.Deuterium}; flight fuel was reserved first.");
+						}
+					}
 					Fleet newFleet = await _ogameService.SendFleet(origin, ships, destination, mission, speed, payload);
 					if (newFleet == null) {
 						_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler, $"Unable to send fleet from {origin.Coordinate.ToString()}: no ships to send.");
 						return (int) SendFleetCode.GenericError;
 					}
-					_tbotInstance.UserData.fleets.Add(newFleet);
+					if (newFleet.ID <= 0) throw new InvalidOperationException("Fleet response contains no valid movement ID.");
+					lock (_fleetLock) {
+						_tbotInstance.UserData.fleets = FleetSnapshotPolicy.AddDispatchedFleet(
+							_tbotInstance.UserData.fleets,
+							newFleet);
+					}
+					onConfirmedFleet?.Invoke(newFleet.ID);
 					_tbotInstance.log(LogLevel.Information, LogSender.FleetScheduler, "Fleet sent successfully!");
-					_tbotInstance.UserData.slots = await _tbotOgameBridge.UpdateSlots();
+					try { _tbotInstance.UserData.slots = await _tbotOgameBridge.UpdateSlots(); }
+					catch (Exception e) { _tbotInstance.log(LogLevel.Debug, LogSender.FleetScheduler, $"Fleet {newFleet.ID} was accepted, but slot refresh failed: {e.Message}"); }
 					return newFleet.ID;
 				} catch (Exception e) {
+					if (e is OgamedException rejection && rejection.StatusCode == HttpStatusCode.BadRequest) {
+						_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler, $"Fleet rejected: {e.Message}");
+						return (int)SendFleetCode.GenericError;
+					}
+					var reconciledFleet = await TryReconcileAmbiguousDispatch(
+						knownFleetIds,
+						origin,
+						requestedShips,
+						destination,
+						mission);
+					if (reconciledFleet != null) {
+						lock (_fleetLock) {
+							_tbotInstance.UserData.fleets = FleetSnapshotPolicy.AddDispatchedFleet(
+								_tbotInstance.UserData.fleets,
+								reconciledFleet);
+						}
+						onConfirmedFleet?.Invoke(reconciledFleet.ID);
+						_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler,
+							$"Fleet dispatch response was ambiguous, but fleet {reconciledFleet.ID} was found during reconciliation. No retry was performed.");
+						return reconciledFleet.ID;
+					}
+
 					_tbotInstance.log(LogLevel.Error, LogSender.FleetScheduler, $"Unable to send fleet: an exception has occurred: {e.Message}");
 					_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler, $"Stacktrace: {e.StackTrace}");
-					return (int) SendFleetCode.GenericError;
+					_ambiguousDispatches[dispatchKey] = (knownFleetIds, requestedShips);
+					return (int)SendFleetCode.AmbiguousDispatch;
 				}
 			} else {
 				_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler, "Unable to send fleet, no slots available");
 				return (int) SendFleetCode.NotEnoughSlots;
+			}
+		}
+
+		private async Task<Fleet> TryReconcileAmbiguousDispatch(
+			HashSet<int> knownFleetIds,
+			Celestial origin,
+			Ships ships,
+			Coordinate destination,
+			Missions mission) {
+			if (knownFleetIds == null) return null;
+			try {
+				var currentFleets = await _ogameService.GetFleets();
+				var matches = currentFleets?.Where(fleet =>
+					fleet != null && fleet.ID > 0 && !fleet.ReturnFlight &&
+					!knownFleetIds.Contains(fleet.ID) &&
+					fleet.Mission == mission &&
+					fleet.Origin != null &&
+					fleet.Origin.IsSame(origin.Coordinate) &&
+					fleet.Destination != null &&
+					fleet.Destination.IsSame(destination) &&
+					fleet.Ships != null &&
+					fleet.Ships.HasAtLeast(ships, 1) &&
+					ships.HasAtLeast(fleet.Ships, 1)).ToList();
+				return matches?.Count == 1 ? matches[0] : null;
+			} catch (Exception reconciliationException) {
+				_tbotInstance.log(LogLevel.Debug, LogSender.FleetScheduler,
+					$"Unable to reconcile ambiguous fleet dispatch: {reconciliationException.Message}");
+				return null;
 			}
 		}
 
@@ -629,9 +973,9 @@ if (
 								DisposeAndRemoveTimer($"RecallTimer-{fleet.ID.ToString()}");
                                 AddTimer($"RecallTimer-{fleet.ID.ToString()}", new Timer(RetireFleet, fleet, (int)newRecallDelay, Timeout.Infinite));
 
-								if ((bool) _tbotInstance.InstanceSettings.Defender.TelegramMessenger.Active) {
-									await _tbotInstance.SendTelegramMessage($"⚠️ Recall delayed! Attack still incoming on {fleet.Origin}. New recall in {newRecallDelay/1000}s");
-								}
+								await _tbotInstance.SendFeatureNotification(_tbotInstance.InstanceSettings.Defender,
+									$"⚠️ Recall delayed! Attack still incoming on {fleet.Origin}. New recall in {newRecallDelay/1000}s",
+									NotificationKind.Warning);
 								return;
 							} else {
 								_tbotInstance.log(LogLevel.Information, LogSender.FleetScheduler, $"[RECALL-OK] Fleet {fleet.ID} return time ({estimatedReturnSeconds}s) is AFTER last attack ({lastAttack.ArriveIn}s) - proceeding with recall");
@@ -657,9 +1001,9 @@ if (
 					_tbotInstance.log(LogLevel.Error, LogSender.FleetScheduler, "Unable to recall fleet: an unknon error has occurred, already recalled ?.");
 				} else {
 					_tbotInstance.log(LogLevel.Information, LogSender.FleetScheduler, $"Fleet recalled. Arrival time: {recalledFleet.BackTime.ToString()}");
-					if ((bool) _tbotInstance.InstanceSettings.Defender.TelegramMessenger.Active) {
-						await _tbotInstance.SendTelegramMessage($"Fleet recalled. Arrival time: {recalledFleet.BackTime.ToString()}");
-					}
+					await _tbotInstance.SendFeatureNotification(_tbotInstance.InstanceSettings.Defender,
+						$"Fleet recalled. Arrival time: {recalledFleet.BackTime.ToString()}",
+						NotificationKind.Success);
 					return;
 				}
 			} catch (Exception e) {
@@ -671,13 +1015,39 @@ if (
 }
 		}
 		public async Task<List<Fleet>> UpdateFleets() {
+			var result = await UpdateFleetsWithFreshness();
+			return (result.Fleets ?? Array.Empty<Fleet>()).ToList();
+		}
+
+		public async Task<FleetSnapshotResult> UpdateFleetsWithFreshness() {
+			await EnterDispatchGate();
 			try {
-				return await _ogameService.GetFleets();
-			} catch (Exception e) {
-				_tbotInstance.log(LogLevel.Debug, LogSender.Tbot, $"UpdateFleets() Exception: {e.Message}");
-				_tbotInstance.log(LogLevel.Debug, LogSender.Tbot, $"UpdateFleets() Exception: {e.Message}");
-				_tbotInstance.log(LogLevel.Warning, LogSender.Tbot, $"Stacktrace: {e.StackTrace}");
-				return new();
+				_lastFleetSnapshotWasFresh = false;
+				try {
+					var fleets = await _ogameService.GetFleets();
+					if (fleets == null)
+						throw new InvalidOperationException("OGame returned no fleet snapshot.");
+					var snapshot = fleets
+						.Where(fleet => fleet != null)
+						.ToList();
+					_lastFleetSnapshotWasFresh = true;
+
+					lock (_fleetLock) {
+						_tbotInstance.UserData.fleets = snapshot;
+						return new FleetSnapshotResult(snapshot.ToList(), true);
+					}
+				} catch (Exception e) {
+					_tbotInstance.log(LogLevel.Debug, LogSender.Tbot, $"UpdateFleets() Exception: {e.Message}");
+					_tbotInstance.log(LogLevel.Warning, LogSender.Tbot, $"Stacktrace: {e.StackTrace}");
+					lock (_fleetLock) {
+						var cached = (_tbotInstance?.UserData?.fleets ?? new List<Fleet>())
+							.Where(fleet => fleet != null)
+							.ToList();
+						return new FleetSnapshotResult(cached, false);
+					}
+				}
+			} finally {
+				_dispatchSemaphore.Release();
 			}
 		}
 
@@ -1359,7 +1729,7 @@ if (
 					List<Celestial> celestialsToExclude = _calcService.ParseCelestialsList(_tbotInstance.InstanceSettings.Brain.AutoRepatriate.Exclude, _tbotInstance.UserData.celestials);
 					List<Celestial> celestialList = _tbotInstance.UserData.celestials.ToList();
 					
-					celestialList = (bool) _tbotInstance.InstanceSettings.Brain.AutoRepatriate.RandomOrder ? celestialList.Shuffle().ToList() : celestialList.ToList();
+					celestialList = (bool) _tbotInstance.InstanceSettings.Brain.AutoRepatriate.RandomOrder ? Tbot.Includes.Extensions.Shuffle(celestialList).ToList() : celestialList.ToList();
 					
 					foreach (Celestial celestial in celestialList) {
 						List<Celestial> closestCelestials = tempCelestials

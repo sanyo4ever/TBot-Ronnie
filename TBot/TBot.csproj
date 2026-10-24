@@ -2,18 +2,18 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <Nullable>disable</Nullable>
     <Authors>TBot</Authors>
-    <Version>3.4.7</Version>
+		<Version>3.5.1-beta2.a</Version>
     <StartupObject>Tbot.Program</StartupObject>
     <Platforms>AnyCPU;x64;x86</Platforms>
     <Copyright>2026 © TBot</Copyright>
     <PackageLicenseExpression>https://licenses.nuget.org/MIT</PackageLicenseExpression>
-    <PackageProjectUrl>https://www.ogame-tbot.net</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/ogame-tbot/TBot</RepositoryUrl>
-    <AssemblyVersion>3.4.7</AssemblyVersion>
-    <FileVersion>3.4.7</FileVersion>
+    <PackageProjectUrl>https://github.com/sanyo4ever/TBot-Ronnie</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/sanyo4ever/TBot-Ronnie</RepositoryUrl>
+		<AssemblyVersion>3.5.1</AssemblyVersion>
+		<FileVersion>3.5.1</FileVersion>
     <Description>OGame Bot</Description>
     <SignAssembly>False</SignAssembly>
     <AssemblyOriginatorKeyFile>ELK-Lab.pfx</AssemblyOriginatorKeyFile>
@@ -23,6 +23,7 @@
     <Configurations>Debug;Release</Configurations>
     <ApplicationIcon>tbot.ico</ApplicationIcon>
     <PackageIcon></PackageIcon>
+      <InformationalVersion>3.5.1-beta2a</InformationalVersion>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
@@ -42,11 +43,13 @@
   </ItemGroup>
 
   <ItemGroup>
-	<PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.8" />
-	<PackageReference Include="Microsoft.Extensions.FileProviders.Physical" Version="9.0.8" />
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-    <PackageReference Include="RestSharp" Version="112.1.0" />
-    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
+	<PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.9" />
+	<PackageReference Include="Microsoft.Extensions.FileProviders.Physical" Version="10.0.9" />
+	<PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.8" />
+	<PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.10" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+    <PackageReference Include="RestSharp" Version="114.0.0" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
     <PackageReference Include="Telegram.Bot" Version="22.6.2" />
     <PackageReference Include="Telegram.Bot.Extensions.Polling" Version="1.0.2" />
   </ItemGroup>
@@ -84,6 +87,10 @@
   <ItemGroup>
     <ProjectReference Include="..\TBot.Ogame.Infrastructure\TBot.Ogame.Infrastructure.csproj" />
     <ProjectReference Include="..\TBot.WebUI\TBot.WebUI.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.WebSockets" Version="2.3.11" />
   </ItemGroup>
 
 </Project>

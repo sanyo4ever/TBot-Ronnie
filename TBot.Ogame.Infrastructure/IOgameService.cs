@@ -38,12 +38,14 @@ namespace TBot.Ogame.Infrastructure {
 		Task<EspionageReport> GetEspionageReport(Coordinate coordinate);
 		Task<EspionageReport> GetEspionageReport(int msgId);
 		Task<List<EspionageReportSummary>> GetEspionageReports();
+		Task<List<EspionageReportSummary>> GetEspionageReportsPage(int page);
 		Task<Facilities> GetFacilities(Celestial celestial);
 		Task<List<Fleet>> GetFleets();
 		Task<GalaxyInfo> GetGalaxyInfo(Coordinate coordinate);
 		Task<GalaxyInfo> GetGalaxyInfo(int galaxy, int system);
 		Task<LFBuildings> GetLFBuildings(Celestial celestial);
 		Task<LFTechs> GetLFTechs(Celestial celestial);
+		Task<ArtifactInventory> GetArtifactInventory(Celestial celestial);
 		Task<LFBonuses> GetLFBonuses();
 		Task<Moon> GetMoon(Moon moon);
 		Task<List<Moon>> GetMoons();
@@ -88,6 +90,8 @@ namespace TBot.Ogame.Infrastructure {
 		Task<bool> IsVacationMode();
 		Task<JumpGateResult> JumpGate(Celestial origin, Celestial destination, Ships ships);
 		Task<bool> SendDiscovery(Celestial origin, Coordinate coords);
+		Task<List<Coordinate>> SendSystemDiscovery(Celestial origin, int galaxy, int system);
+		Task<BoundedDiscoveryResult> SendBoundedSystemDiscovery(Celestial origin, int galaxy, int system, int maxFleets, IReadOnlyList<int> positions);
 		void KillOgamedExecutable(CancellationToken ct = default);
 		Task Login();
 		Task Logout();
@@ -99,7 +103,6 @@ namespace TBot.Ogame.Infrastructure {
 		Task SolveCaptcha(string challengeID, int answer);
 		        Task<bool> AbandonCelestial(Celestial celestial);
                 Task<List<Coordinate>> GetPositionsAvailableForDiscoveryFleet(Celestial celestial, Coordinate coordinate);
-        Task<int> GetAvailableDiscoveries();
         Task<int> GetAvailableDiscoveries(Celestial celestial);
 	}
 }

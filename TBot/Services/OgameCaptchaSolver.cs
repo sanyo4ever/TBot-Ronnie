@@ -1,4 +1,3 @@
-using RestSharp;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Processing;
 using System;
@@ -8,44 +7,84 @@ using System.Security.Cryptography;
 
 namespace Tbot.Services {
 
+	public sealed class CaptchaSolverException : InvalidOperationException {
+		public CaptchaSolverException(string message) : base(message) {
+		}
+
+		public CaptchaSolverException(string message, Exception innerException) : base(message, innerException) {
+		}
+	}
+
 	public static class OgameCaptchaSolver {
 
-		public static int GetCapcthaSolution(byte[] images, byte[] text) {
-			string textHash = GetImageHash(text);
-			string[] hashes = GetCaptchaImagesHashes(images);
-			int answer;
-			if (CaptchaTextPairs.TryGetValue(textHash, out var stringAnswer) && CaptchaImagePairs.TryGetValue(stringAnswer, out var correctHash))
-				for (int i = 0; i < hashes.Length; i++)
-					if (hashes[i] == correctHash)
-						return i;
+		public static int GetCaptchaSolution(byte[] images, byte[] text) {
+			if (images == null || images.Length == 0)
+				throw new CaptchaSolverException("The CAPTCHA image strip is empty.");
+			if (text == null || text.Length == 0)
+				throw new CaptchaSolverException("The CAPTCHA question image is empty.");
 
-			Random random = new();
-			answer = random.Next(0, 4);
+			string textHash;
+			try {
+				textHash = GetImageHash(text);
+			} catch (Exception ex) {
+				throw new CaptchaSolverException("The CAPTCHA question image is invalid.", ex);
+			}
 
-			return answer;
+			if (!CaptchaTextPairs.TryGetValue(textHash, out var expectedImage))
+				throw new CaptchaSolverException("The CAPTCHA question is not recognized by the local solver.");
+			if (!CaptchaImagePairs.TryGetValue(expectedImage, out var expectedHash) || string.IsNullOrWhiteSpace(expectedHash))
+				throw new CaptchaSolverException($"The CAPTCHA image mapping for '{expectedImage}' is unavailable.");
+
+			string[] hashes;
+			try {
+				hashes = GetCaptchaImagesHashes(images);
+			} catch (Exception ex) {
+				throw new CaptchaSolverException("The CAPTCHA image strip is invalid.", ex);
+			}
+
+			int matchingIndex = -1;
+			for (int i = 0; i < hashes.Length; i++) {
+				if (hashes[i] != expectedHash)
+					continue;
+				if (matchingIndex != -1)
+					throw new CaptchaSolverException("The CAPTCHA contains more than one matching image.");
+				matchingIndex = i;
+			}
+
+			if (matchingIndex == -1)
+				throw new CaptchaSolverException("The requested CAPTCHA image is not present in the image strip.");
+
+			return matchingIndex;
 		}
-		
-		public static int GetCapcthaSolution(string base64images, string base64text) {
-			string textHash = GetImageHash(base64text);
-			string[] hashes = GetCaptchaImagesHashes(base64images);
-			int answer;
-			if (CaptchaTextPairs.TryGetValue(textHash, out var stringAnswer) && CaptchaImagePairs.TryGetValue(stringAnswer, out var correctHash))
-				for (int i = 0; i < hashes.Length; i++)
-					if (hashes[i] == correctHash)
-						return i;
 
-			Random random = new();
-			answer = random.Next(0, 4);
+		public static int GetCaptchaSolution(string base64Images, string base64Text) {
+			if (string.IsNullOrWhiteSpace(base64Images) || string.IsNullOrWhiteSpace(base64Text))
+				throw new CaptchaSolverException("The CAPTCHA images and question are required.");
 
-			return answer;
+			try {
+				return GetCaptchaSolution(DecodeBase64Image(base64Images), DecodeBase64Image(base64Text));
+			} catch (CaptchaSolverException) {
+				throw;
+			} catch (FormatException ex) {
+				throw new CaptchaSolverException("The CAPTCHA payload is not valid Base64.", ex);
+			}
 		}
+
+		[Obsolete("Use GetCaptchaSolution instead.")]
+		public static int GetCapcthaSolution(byte[] images, byte[] text) => GetCaptchaSolution(images, text);
+
+		[Obsolete("Use GetCaptchaSolution instead.")]
+		public static int GetCapcthaSolution(string base64Images, string base64Text) => GetCaptchaSolution(base64Images, base64Text);
 
 		private static string[] GetCaptchaImagesHashes(byte[] images) {
-			string[] result = new string[4];
+			using Image originalImage = Image.Load(images);
+			if (originalImage.Width < 4 || originalImage.Width % 4 != 0 || originalImage.Height < 1)
+				throw new InvalidDataException("The CAPTCHA image strip must contain four equally sized images.");
 
-			Image originalImage = Image.Load(images);
-			for (int i = 0; i < 4; i++) {
-				Rectangle cropRect = new(i * 60, 0, 60, originalImage.Height);
+			int tileWidth = originalImage.Width / 4;
+			string[] result = new string[4];
+			for (int i = 0; i < result.Length; i++) {
+				Rectangle cropRect = new(i * tileWidth, 0, tileWidth, originalImage.Height);
 				using Image thisPicture = originalImage.Clone(p => p.Crop(cropRect));
 				using MemoryStream ms = new();
 				thisPicture.SaveAsPng(ms);
@@ -54,22 +93,23 @@ namespace Tbot.Services {
 			return result;
 		}
 
-		private static string[] GetCaptchaImagesHashes(string base64String) {
-			byte[] data = Convert.FromBase64String(base64String);
-			return GetCaptchaImagesHashes(data);
-		}
-
 		private static string GetImageHash(byte[] picture) {
-			Image image = Image.Load(picture);
+			using Image image = Image.Load(picture);
 			using MemoryStream ms = new();
 			image.SaveAsPng(ms);
 			using MD5 md5 = MD5.Create();
 			return BitConverter.ToString(md5.ComputeHash(ms.ToArray())).Replace("-", "").ToLower();
 		}
 		
-		private static string GetImageHash(string base64String) {
-			byte[] data = Convert.FromBase64String(base64String);
-			return GetImageHash(data);
+		private static byte[] DecodeBase64Image(string value) {
+			string encoded = value.Trim();
+			if (encoded.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) {
+				int separator = encoded.IndexOf(',');
+				if (separator < 0)
+					throw new FormatException("The data URI does not contain a payload.");
+				encoded = encoded[(separator + 1)..];
+			}
+			return Convert.FromBase64String(encoded);
 		}
 
 		private static readonly Dictionary<string, string> CaptchaImagePairs = new()
@@ -91,7 +131,6 @@ namespace Tbot.Services {
 			{ "the Castle", "c7e625146dd0a063f2903d011b2d32cd" },
 			{ "the Castlie", "c7e625146dd0a063f2903d011b2d32cd" },
 			{ "the Cherry", "cd4d09e93afc6bd0e6ad22927d2d8888" },
-			{ "the Clock", "" },
 			{ "the Cloud", "0672c2f12dd29f8a4cf8be15262ff3e4" },
 			{ "the Colourea Pencils", "21d2c060b5bad6a77cf382adb616e97b" },
 			{ "the Coloured Pencils", "21d2c060b5bad6a77cf382adb616e97b" },
@@ -1373,7 +1412,7 @@ namespace Tbot.Services {
 			{ "ee9212938d24fdbb2da640cb48b63e84", "the Rainbow" },
 			{ "eeceb2245a6d19552a0465cdfdeea705", "the Ice Cream" },
 			{ "eee9352dda5ca2287206cccfa652664e", "the Fried Egg" },
-			{ "eee9ff1f16062a005086e55e714faf7a", "the Friea Eqg" },
+			{ "eee9ff1f16062a005086e55e714faf7a", "the Fried Egg" },
 			{ "ef563f22f532d8d5e807d2cb5a620743", "the Bottle" },
 			{ "ef835eeb7f2615526d92b2ea38c83712", "the Apple" },
 			{ "efa1f31c844e0d33eab4a8e7186b68f9", "the Sun" },

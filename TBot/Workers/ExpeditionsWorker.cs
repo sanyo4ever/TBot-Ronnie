@@ -100,23 +100,10 @@ namespace Tbot.Workers {
 					origins.Add(best);
 			}
 
-			return (bool)_tbotInstance.InstanceSettings.Expeditions.RandomizeOrder
-				? origins.Shuffle().ToList()
-				: origins;
-		}
-
-		private List<Celestial> FilterExpeditionCandidates(List<Celestial> origins) {
-			// A cached empty fleet is useful information: do not open that origin just
-			// to discover again that it cannot send. A null Ships value means that the
-			// cache is incomplete, so the origin remains eligible for one live check.
-			var candidates = origins
-				.Where(origin => origin.Ships == null || !origin.Ships.GetMovableShips().IsEmpty())
-				.ToList();
-
-			foreach (var skipped in origins.Except(candidates))
-				DoLog(LogLevel.Debug, $"Skipping {skipped.Coordinate}: no movable ships in the cached snapshot.");
-
-			return candidates;
+			// Keep the configured origins stable. Randomization is applied only to the
+			// planner's tie-break order below; it must never change which origins are
+			// considered or make a failed origin hide the following ones.
+			return origins;
 		}
 
 		private Ships BuildManualExpeditionFleet() {
@@ -168,6 +155,36 @@ namespace Tbot.Workers {
 				lfBonuses,
 				_tbotInstance.UserData.userInfo.Class,
 				_tbotInstance.UserData.serverData.ProbeCargo);
+		}
+
+		private async Task<Ships> RefreshExpeditionShips(Celestial origin) {
+			try {
+				// The bridge deliberately swallows update errors for the other workers. That
+				// is useful for a best-effort empire refresh, but it is unsafe here: a stale
+				// empty snapshot would make a valid origin look permanently unusable.
+				origin.Ships = await _ogameService.GetShips(origin);
+				return origin.Ships;
+			} catch (Exception e) {
+				DoLog(LogLevel.Warning, $"Unable to refresh expedition ships on {origin.Coordinate}: {e.Message}");
+				return null;
+			}
+		}
+
+		private async Task<List<Fleet>> TryRefreshFleetSnapshot(string phase) {
+			FleetSnapshotResult snapshot;
+			if (_fleetScheduler is IFleetSnapshotProvider atomicProvider)
+				snapshot = await atomicProvider.UpdateFleetsWithFreshness();
+			else {
+				var fleets = await _fleetScheduler.UpdateFleets();
+				snapshot = new FleetSnapshotResult(fleets ?? new List<Fleet>(), _fleetScheduler.LastFleetSnapshotWasFresh);
+			}
+
+			if (!snapshot.IsFresh) {
+				DoLog(LogLevel.Warning, $"Fleet snapshot was not fresh during Expeditions {phase}; postponing dispatch.");
+				return null;
+			}
+
+			return (snapshot.Fleets ?? Array.Empty<Fleet>()).ToList();
 		}
 
 		private Coordinate BuildExpeditionDestination(Celestial origin, int expeditionCount, List<int> usedSystems, Random random) {
@@ -225,7 +242,11 @@ namespace Tbot.Workers {
 
 				// This is the only account-wide snapshot phase. No origin is selected here.
 				_tbotInstance.UserData.slots = await _tbotOgameBridge.UpdateSlots();
-				_tbotInstance.UserData.fleets = await _fleetScheduler.UpdateFleets();
+				_tbotInstance.UserData.fleets = await TryRefreshFleetSnapshot("startup");
+				if (_tbotInstance.UserData.fleets == null) {
+					delay = true;
+					return;
+				}
 				_tbotInstance.UserData.serverData = await _ogameService.GetServerData();
 
 				var rankSlotsPriority = new List<RankSlotsPriority> {
@@ -303,114 +324,125 @@ namespace Tbot.Workers {
 					return;
 				}
 
-				origins = FilterExpeditionCandidates(origins);
-				if (origins.Count == 0) {
-					DoLog(LogLevel.Information, "No configured expedition origin currently has movable ships.");
-					delay = true;
-					return;
-				}
-
 				// LF bonuses are account-wide. They must not be refreshed once per origin.
 				var lfBonuses = await _ogameService.GetLFBonuses();
-				int maxPerOrigin = (int?)_tbotInstance.InstanceSettings.Expeditions.MaxExpeditionsPerOrigin ?? 1;
-				var capacities = origins
-					.Select(origin => Math.Max(0, maxPerOrigin - CountActiveExpeditionsFromOrigin(origin)))
+				int maxPerOrigin = Math.Max(0, (int?)_tbotInstance.InstanceSettings.Expeditions.MaxExpeditionsPerOrigin ?? 1);
+				var activeExpeditions = origins
+					.Select(CountActiveExpeditionsFromOrigin)
 					.ToArray();
-				var sentByOrigin = new int[origins.Count];
-				var unavailableOrigins = new bool[origins.Count];
 				var remaining = expeditionsToSend;
-				var planningStart = _nextOriginIndex % origins.Count;
+				var planningStart = _nextOriginIndex;
+				var selectionOrder = Enumerable.Range(0, origins.Count).ToList();
+				if ((bool)_tbotInstance.InstanceSettings.Expeditions.RandomizeOrder)
+					selectionOrder = Tbot.Includes.Extensions.Shuffle(selectionOrder).ToList();
+				var dispatchPlanner = new ExpeditionDispatchPlanner(activeExpeditions, maxPerOrigin, planningStart, selectionOrder);
 				var random = new Random();
 				var usedSystems = new List<int>();
 
-			while (remaining > 0) {
-				// Rebuild the plan after every failed origin. This is what lets an
-				// origin with spare capacity take over instead of losing a slot.
-				var residualCapacities = capacities
-					.Select((capacity, index) => unavailableOrigins[index]
-						? 0
-						: Math.Max(0, capacity - sentByOrigin[index]))
-					.ToArray();
-				var plan = ExpeditionOriginPlanner.BuildRoundRobinPlan(residualCapacities, remaining, planningStart);
-				if (plan.Sum() == 0)
-					break;
-
-				var progressInPass = false;
-				for (var offset = 0; offset < origins.Count && remaining > 0; offset++) {
-					var originIndex = (planningStart + offset) % origins.Count;
-					var count = plan[originIndex];
-					if (count <= 0)
-						continue;
-
-					var origin = origins[originIndex];
-					for (var attempt = 0; attempt < count && remaining > 0; attempt++) {
-						_tbotInstance.UserData.fleets = await _fleetScheduler.UpdateFleets();
-						if (CountActiveExpeditionsFromOrigin(origin) >= maxPerOrigin)
-							break;
-
-						_tbotInstance.UserData.slots = await _tbotOgameBridge.UpdateSlots();
-						if (_tbotInstance.UserData.slots.ExpFree <= 0 ||
-							_tbotInstance.UserData.slots.Free <= (int)_tbotInstance.InstanceSettings.General.SlotsToLeaveFree) {
-							delay = true;
-							return;
-						}
-
-						// Only an origin that is about to send is refreshed. Multiple
-						// sends from the same origin are real activity and are expected.
-						var originUpdated = await _tbotOgameBridge.UpdatePlanet(origin, UpdateTypes.Ships);
-						var fleet = BuildExpeditionFleet(originUpdated, lfBonuses);
-						if (fleet == null || fleet.IsEmpty() || originUpdated.Ships == null || !originUpdated.Ships.HasAtLeast(fleet, 1)) {
-							DoLog(LogLevel.Information, $"No usable expedition fleet on {originUpdated.Coordinate}; excluding this origin for the rest of the cycle.");
-							unavailableOrigins[originIndex] = true;
-							break;
-						}
-
-						var destination = BuildExpeditionDestination(originUpdated, remaining, usedSystems, random);
-						var payload = new Resources();
-						if ((long)_tbotInstance.InstanceSettings.Expeditions.FuelToCarry > 0)
-							payload.Deuterium = (long)_tbotInstance.InstanceSettings.Expeditions.FuelToCarry;
-
-						DoLog(LogLevel.Information, $"Sending expedition from {originUpdated.Coordinate} to {destination}");
-						var fleetId = await _fleetScheduler.SendFleet(
-							originUpdated,
-							fleet,
-							destination,
-							Missions.Expedition,
-							Speeds.HundredPercent,
-							payload);
-
-						if (fleetId == (int)SendFleetCode.AfterSleepTime) {
-							stop = true;
-							return;
-						}
-						if (fleetId == (int)SendFleetCode.NotEnoughSlots) {
-							delay = true;
-							return;
-						}
-						if (fleetId <= (int)SendFleetCode.GenericError) {
-							DoLog(LogLevel.Warning, $"Expedition was not sent from {originUpdated.Coordinate}; excluding this origin for the rest of the cycle.");
-							unavailableOrigins[originIndex] = true;
-							break;
-						}
-
-						sentByOrigin[originIndex]++;
-						remaining--;
-						progressInPass = true;
-						planningStart = (originIndex + 1) % origins.Count;
-
-						int minWait = (int)_tbotInstance.InstanceSettings.Expeditions.MinWaitNextFleet;
-						int maxWait = (int)_tbotInstance.InstanceSettings.Expeditions.MaxWaitNextFleet;
-						if (maxWait < minWait)
-							(minWait, maxWait) = (maxWait, minWait);
-						await Task.Delay((int)RandomizeHelper.CalcRandomIntervalSecToMs(minWait, maxWait), _ct);
+				while (remaining > 0) {
+					// Refresh the account-wide fleet state before each candidate. This keeps
+					// the per-origin cap correct even when another worker has just dispatched.
+					_tbotInstance.UserData.fleets = await TryRefreshFleetSnapshot("dispatch planning");
+					if (_tbotInstance.UserData.fleets == null) {
+						delay = true;
+						return;
 					}
+					dispatchPlanner.SynchronizeActiveCounts(origins
+						.Select(CountActiveExpeditionsFromOrigin)
+						.ToArray());
+
+					var originIndex = dispatchPlanner.SelectNextOrigin();
+					if (!originIndex.HasValue) {
+						if (!dispatchPlanner.BeginNextRound())
+							break;
+						continue;
+					}
+
+					var origin = origins[originIndex.Value];
+					_tbotInstance.UserData.slots = await _tbotOgameBridge.UpdateSlots();
+					if (_tbotInstance.UserData.slots.ExpFree <= 0 ||
+						_tbotInstance.UserData.slots.Free <= (int)_tbotInstance.InstanceSettings.General.SlotsToLeaveFree) {
+						delay = true;
+						return;
+					}
+
+					Ships refreshedShips;
+					Ships fleet;
+					try {
+						refreshedShips = await RefreshExpeditionShips(origin);
+					} catch (OperationCanceledException) when (_ct.IsCancellationRequested) {
+						throw;
+					} catch (Exception e) {
+						dispatchPlanner.MarkUnavailable(originIndex.Value);
+						DoLog(LogLevel.Warning, $"Unable to prepare expedition from {origin.Coordinate}; skipping this origin for the current execution: {e.Message}");
+						continue;
+					}
+
+					if (refreshedShips == null) {
+						dispatchPlanner.MarkUnavailable(originIndex.Value);
+						DoLog(LogLevel.Warning, $"Unable to verify expedition ships on {origin.Coordinate}; skipping this origin for the current execution.");
+						continue;
+					}
+
+					try {
+						fleet = BuildExpeditionFleet(origin, lfBonuses);
+					} catch (OperationCanceledException) when (_ct.IsCancellationRequested) {
+						throw;
+					} catch (Exception e) {
+						dispatchPlanner.MarkUnavailable(originIndex.Value);
+						DoLog(LogLevel.Warning, $"Unable to build expedition fleet on {origin.Coordinate}; skipping this origin for the current execution: {e.Message}");
+						continue;
+					}
+
+					if (fleet == null || fleet.IsEmpty() || !refreshedShips.HasAtLeast(fleet, 1)) {
+						dispatchPlanner.MarkUnavailable(originIndex.Value);
+						DoLog(LogLevel.Information, $"No usable expedition fleet on {origin.Coordinate}; skipping this origin for the current execution.");
+						continue;
+					}
+
+					var destination = BuildExpeditionDestination(origin, remaining, usedSystems, random);
+					var payload = new Resources();
+					if ((long)_tbotInstance.InstanceSettings.Expeditions.FuelToCarry > 0)
+						payload.Deuterium = (long)_tbotInstance.InstanceSettings.Expeditions.FuelToCarry;
+
+					DoLog(LogLevel.Information, $"Sending expedition from {origin.Coordinate} to {destination}");
+					var fleetId = await _fleetScheduler.SendExpedition(
+						origin,
+						fleet,
+						destination,
+						Speeds.HundredPercent,
+						payload,
+						_tbotInstance.UserData.userInfo.Class);
+
+					if (fleetId == (int)SendFleetCode.AfterSleepTime) {
+						stop = true;
+						return;
+					}
+					if (fleetId == (int)SendFleetCode.NotEnoughSlots) {
+						delay = true;
+						return;
+					}
+					if (fleetId == (int)SendFleetCode.AmbiguousDispatch) {
+						DoLog(LogLevel.Error, $"Expedition dispatch from {origin.Coordinate} could not be reconciled; ending this cycle without retrying.");
+						delay = true;
+						return;
+					}
+					if (fleetId <= (int)SendFleetCode.GenericError) {
+						DoLog(LogLevel.Warning, $"Expedition was not confirmed from {origin.Coordinate}; skipping this origin without retrying blindly.");
+						dispatchPlanner.MarkUnavailable(originIndex.Value);
+						continue;
+					}
+
+					dispatchPlanner.MarkSent(originIndex.Value);
+					remaining--;
+					_nextOriginIndex = (originIndex.Value + 1) % origins.Count;
+
+					int minWait = (int)_tbotInstance.InstanceSettings.Expeditions.MinWaitNextFleet;
+					int maxWait = (int)_tbotInstance.InstanceSettings.Expeditions.MaxWaitNextFleet;
+					if (maxWait < minWait)
+						(minWait, maxWait) = (maxWait, minWait);
+					await Task.Delay((int)RandomizeHelper.CalcRandomIntervalSecToMs(minWait, maxWait), _ct);
 				}
-
-				if (!progressInPass)
-					break;
-			}
-
-			_nextOriginIndex = planningStart;
 
 				_tbotInstance.UserData.fleets = await _fleetScheduler.UpdateFleets();
 				var expeditionFleets = _tbotInstance.UserData.fleets

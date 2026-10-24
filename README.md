@@ -1,17 +1,16 @@
 ![TBot - OGame bot](https://ogame-tbot.net/logo-claim.jpg "TBot - OGame bot")
 
 # TBot
-OGame Bot
+OGame Bot — sanyo4ever maintenance fork, based on [Ronnie's TBot](https://github.com/ronnie32/TBot).
 
-[![GitHub all releases](https://img.shields.io/github/downloads/ogame-tbot/TBot/total)](https://github.com/ogame-tbot/TBot/releases/latest)
-[![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/ogame-tbot/TBot)](https://github.com/ogame-tbot/TBot/releases/latest)
-[![Discord](https://img.shields.io/discord/801453618770214923)](https://discord.gg/NZSaY4aQ7J)
+Our current line starts from Ronnie's **v3.5.1-beta2**, with reviewed stability fixes carried forward from our previous maintenance line. The first revision is **3.5.1-beta2a**, still a prerelease. We retain the work and attribution of Ronnie, [0xE232FE](https://github.com/0xE232FE/TBot), [Cheeeh](https://github.com/Cheeeh/TBot) and the original contributors. The pinned backend is [our ogame.mod fork](https://github.com/sanyo4ever/ogame.mod), based on Ronnie's release backend.
 
-TBot is a .NET 6 [OGame](https://lobby.ogame.gameforge.com/) bot based on [ogamed deamon](https://github.com/alaingilbert/ogame) by alaingilbert
+[![Fork CI](https://github.com/sanyo4ever/TBot-Ronnie/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/sanyo4ever/TBot-Ronnie/actions/workflows/build.yml)
+[Releases and checksums](https://github.com/sanyo4ever/TBot-Ronnie/releases) · [Maintenance and release guide](docs/FORK.md)
 
-Feel free to publish issues or pull requests
+TBot is an [OGame](https://lobby.ogame.gameforge.com/) bot using [ogamed](https://github.com/alaingilbert/ogame) by alaingilbert. Our source targets **.NET 10**; release ZIPs contain the runtime. See [Building](#building).
 
-TBot supports Ogame **v11.15**!
+The console release preserves Ronnie's planners and OGame 13 support. Fixture tests and builds do not certify every current live-game action; no live fleet-send validation was performed for this maintenance release.
 
 ## How to Update from 0.3.1
 
@@ -72,6 +71,16 @@ The *settings.json* should be compiled as follows:
 }
 ```
 NB: The settings should be pointing to a path relative to *settings.json* directory.
+
+Discord notifications are configured per instance in *instance_settings.json*:
+```json
+"DiscordWebhook": {
+        "Active": true,
+        "Url": "https://discord.com/api/webhooks/<id>/<token>",
+        "Username": "TBot"
+}
+```
+The webhook receives the same status and action notifications sent by TBot through Telegram. Set `DiscordWebhook.Active` to `false` to disable Discord notifications. `SleepMode.DiscordWebhook.Active` and `Defender.DiscordWebhook.Active` can be set to `false` to disable only those feature notifications. An incoming webhook cannot receive commands, so commands such as `/help` and `/bidauction` remain available through Telegram.
   
 ### Important Notices 
 You must use **different ports** for **each instance** and for **webUI**. They all must be open and free.
@@ -200,13 +209,13 @@ You can change settings from WebUI or editing the files directly.
   * Under "Language" type your universe community code. You can find it by logging to your account and analyzing the url, such as s161-us.ogame.gameforge.com => us
 * Configure the bot by editing all settings fields
   * All config options are sorted by feature, [check which features you](#features) want and configure them before activating
-* Make sure you have installed the [.NET 6 runtime](https://dotnet.microsoft.com/download/dotnet/6.0) for your platform
+* Published release ZIPs include their .NET runtime. For a framework-dependent build from `main`, install the [ASP.NET Core 10 runtime](https://dotnet.microsoft.com/en-us/download/dotnet/10.0) for your platform.
 * Run TBot.exe
 
 ## Running on Linux/MacOS
 * Open a terminal (if you are in a desktop environment)
 * Download latest release for your platform.
-  * `wget https://github.com/ogame-tbot/TBot/releases/download/VERSION/TBot-VERSION-PLATFORM.zip` (*change the filename to your real one!*)
+  * Download the matching ZIP from [our Releases page](https://github.com/sanyo4ever/TBot-Ronnie/releases). A fork tag such as `3.5.1-beta2a` has packages named `TBot-3.5.1-beta2a-PLATFORM.zip`.
 * Unzip the downloaded file
   * `unzip TBot-VERSION-PLATFORM.zip -d TBot` (*change the filename to your real one!*)
 * Make ogamed executable (*this is only required on first run or update*)
@@ -219,32 +228,24 @@ You can change settings from WebUI or editing the files directly.
   * Under "Language" type your universe community code. You can find it by logging to your account and analyzing the url, such as s161-us.ogame.gameforge.com => **us**
 * Configure the bot by editing all instance settings.json fields
   * All config options are sorted by feature, [check which features](#features) you want and configure them before activating
-* Make sure you have installed the [.NET 6 runtime](https://dotnet.microsoft.com/download/dotnet/6.0) for your platform
+* Published release ZIPs include their .NET runtime. For a framework-dependent build from `main`, install the [ASP.NET Core 10 runtime](https://dotnet.microsoft.com/en-us/download/dotnet/10.0) for your platform.
 * Run TBot
   * `./TBot`
 
 ## Running on Amazon Web Services
 **WARNING: Ogame is positively blocking IPs from datacenters. You probably need a residential proxy to run on AWS, or any other VPS.**
 
-Some successful tests have been done to run TBot on the smallest instance of LightSail (1 vCPU, 20 GB SSD, 500 MB RAM and 1 TB outbound traffic) on Amazon Linux 2, which is free for a three month trial. In order to run it, steps should be as follow:
-* Create your account on Amazon Web Services (Credit Card required), and create a LightSail Instance running Amazon Linux 2. The smallest one fits into the "Free Tier" Program, which allows a 3 month free trial.
+The original LightSail deployment was tested on Amazon Linux 2 with older TBot releases. For current `main`, choose an operating system supported by [.NET 10](https://github.com/dotnet/core/blob/main/release-notes/10.0/supported-os.md). The general deployment steps are:
+* Create a LightSail instance running a supported Linux distribution.
 * Select the ports where you want to connect, and open them in the Networking Settings on the instance's AWS Console (ex. ports 8000 - 8020 open for TCP and from any ip address if you don't know where you will be connecting from). This should make it accessible to the public internet.
 * Connecto to AWS instance using SSH and the .pem key you get during the instance setup:
 ```
 $ ssh -i ~/pem/<my>.pem ec2-user@<instance's public ip-address>
 ```
 
-* Update the system with  
-```
-sudo yum update
-```
+* Update the system using your distribution's package manager.
 
-* Install the .NET 6 tuntime, which can be done using [these instructions for CentOs](https://docs.servicestack.net/deploy-netcore-to-amazon-linux-2-ami), and which is something like
-```
-$ sudo rpm -Uvh https://packages.microsoft.com/config/centos/7/packages-microsoft-prod.rpm
-$ sudo yum install aspnetcore-runtime-6.0
-$ sudo yum install dotnet-sdk-6.0
-```
+* Release ZIPs include their .NET runtime. For framework-dependent builds, follow the [.NET Linux installation instructions](https://learn.microsoft.com/en-us/dotnet/core/install/linux) for your distribution and install the matching ASP.NET Core runtime. Use .NET 10 for current `main`; Ronnie's `v3.5.1-beta2` source release targets .NET 9.
 
 * Upload your TBot files, which were previously downloaded and setup correctly. You can do this by using something like FileZilla using sftp and the same credentials as the ssh connection and then copy your TBot folder into the user's home directory in the server. Make sure your settings file has the public ip of the aws instance and the port where you want to connect.
 * Follow the instructions as written above for Linux by changing permissions.
@@ -275,9 +276,19 @@ Feel free to fork and make pull requests or give suggestions posting an Issue or
 Also, a proper documentation about how to deal with settings would no doubt be helpful, especially for new users.
 
 ## Building
-We write and build TBot with Visual Studio 2022 Community Edition, thus .NET 6 SDK is enough for command line compilation.
 
-Releases are automated by GitHub Actions, take a look at the [workflows](https://github.com/ogame-tbot/TBot/tree/master/.github/workflows) if you are interested in the build process.
-  
+Use a stable .NET 10 SDK selected by `global.json`, Git and the Go toolchain specified in `ogame/go.mod`. Ronnie's upstream release targets .NET 9; our toolchain policy is a separate fork layer.
+
+```sh
+git clone --recurse-submodules --branch main https://github.com/sanyo4ever/TBot-Ronnie.git
+cd TBot-Ronnie
+dotnet test TBot.sln -c Release
+cd ogame
+go test -count=1 ./...
+go build ./...
+```
+
+Tests require no game account. Source builds also need `go build ./cmd/ogamed-tbot`, with the resulting `ogamed` executable beside TBot. Our workflow builds and packages both executables for seven platforms; see [the release guide](docs/FORK.md).
+
 ## Portability
 TBot is currently developed and mantained for Windows 64bit, Windows 32bit, Linux x86_64, MacOS 64bit, MacOS ARM, Linux ARMv7 and Linux ARM64.

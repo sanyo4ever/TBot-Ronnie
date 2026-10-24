@@ -1,0 +1,206 @@
+name: Fork CI and release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Reviewed author release plus letter, for example 3.5.1-beta2a'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-build-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      label: ${{ steps.version.outputs.label }}
+      version: ${{ steps.version.outputs.version }}
+      assembly: ${{ steps.version.outputs.assembly }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test release version policy
+        run: python3 -m unittest discover -s tools/tests -v
+      - name: Validate version and release branch
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+              echo '::error::Release builds must run from main.'
+              exit 1
+            fi
+            python3 tools/release_version.py --requested "$REQUESTED_VERSION" --github-output "$GITHUB_OUTPUT"
+          else
+            python3 tools/release_version.py --ci-run "$GITHUB_RUN_NUMBER" --github-output "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: '0'
+      VERSION: ${{ needs.version.outputs.label }}
+      PACKAGE_VERSION: ${{ needs.version.outputs.version }}
+      ASSEMBLY_VERSION: ${{ needs.version.outputs.assembly }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ogame/go.mod
+          cache-dependency-path: ogame/go.sum
+      - name: C# regression tests
+        shell: bash
+        run: |
+          dotnet test TBot.sln -c Release \
+            -p:Version="$PACKAGE_VERSION" -p:InformationalVersion="$VERSION" \
+            -p:AssemblyVersion="$ASSEMBLY_VERSION" -p:FileVersion="$ASSEMBLY_VERSION"
+      - name: Verify pinned Go checkout
+        shell: bash
+        run: test "$(git rev-parse HEAD:ogame)" = "$(git -C ogame rev-parse HEAD)"
+      - name: Go regression tests and build
+        working-directory: ogame
+        run: |
+          go test -count=1 ./...
+          go build ./...
+
+  package:
+    needs: [version, test]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {platform: win64, rid: win-x64, goos: windows, goarch: amd64, goarm: '', backend: ogamed.exe}
+          - {platform: win32, rid: win-x86, goos: windows, goarch: '386', goarm: '', backend: ogamed.exe}
+          - {platform: linux64, rid: linux-x64, goos: linux, goarch: amd64, goarm: '', backend: ogamed}
+          - {platform: linuxarm, rid: linux-arm, goos: linux, goarch: arm, goarm: '7', backend: ogamed}
+          - {platform: linuxarm64, rid: linux-arm64, goos: linux, goarch: arm64, goarm: '', backend: ogamed}
+          - {platform: osx64, rid: osx-x64, goos: darwin, goarch: amd64, goarm: '', backend: ogamed}
+          - {platform: osx-arm64, rid: osx-arm64, goos: darwin, goarch: arm64, goarm: '', backend: ogamed}
+    env:
+      VERSION: ${{ needs.version.outputs.label }}
+      PACKAGE_VERSION: ${{ needs.version.outputs.version }}
+      ASSEMBLY_VERSION: ${{ needs.version.outputs.assembly }}
+      PLATFORM: ${{ matrix.platform }}
+      RID: ${{ matrix.rid }}
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ogame/go.mod
+          cache-dependency-path: ogame/go.sum
+      - name: Publish self-contained TBot
+        shell: bash
+        run: |
+          dotnet publish TBot -c Release -r "$RID" -o "publish/$PLATFORM" \
+            -p:Version="$PACKAGE_VERSION" -p:AssemblyVersion="$ASSEMBLY_VERSION" \
+            -p:FileVersion="$ASSEMBLY_VERSION" -p:InformationalVersion="$VERSION" \
+            -p:PublishSingleFile=true --self-contained true
+      - name: Build pinned ogamed-tbot
+        working-directory: ogame
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          BACKEND: ${{ matrix.backend }}
+        shell: bash
+        run: go build -trimpath -o "../publish/$PLATFORM/$BACKEND" ./cmd/ogamed-tbot
+      - name: Package with source provenance
+        shell: bash
+        run: |
+          cp README.md "publish/$PLATFORM/"
+          cp ogame/LICENSE "publish/$PLATFORM/OGAME-LICENSE"
+          cp fork-version.json "publish/$PLATFORM/"
+          {
+            echo "Version: $VERSION"
+            echo "Package Version: $PACKAGE_VERSION"
+            echo "Assembly Version: $ASSEMBLY_VERSION"
+            echo "Repository: $GITHUB_REPOSITORY"
+            echo "TBot commit: $GITHUB_SHA"
+            echo "Go commit: $(git -C ogame rev-parse HEAD)"
+            echo "Go gitlink: $(git rev-parse HEAD:ogame)"
+            echo "Platform: $RID"
+            echo ".NET SDK: $(dotnet --version)"
+            go version
+          } > "publish/$PLATFORM/BUILD-INFO.txt"
+          if [[ "$PLATFORM" != win* ]]; then
+            chmod +x "publish/$PLATFORM/TBot" "publish/$PLATFORM/ogamed"
+          fi
+          zip -q -r "TBot-$VERSION-$PLATFORM.zip" "publish/$PLATFORM/"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: TBot-${{ env.VERSION }}-${{ matrix.platform }}
+          path: TBot-${{ env.VERSION }}-${{ matrix.platform }}.zip
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+  draft-release:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [version, package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.label }}
+      RELEASE_TAG: ${{ needs.version.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: TBot-*
+          path: dist
+          merge-multiple: true
+      - name: Verify package count and checksums
+        shell: bash
+        run: |
+          packages=(dist/TBot-*.zip)
+          [[ ${#packages[@]} -eq 7 ]] || { echo '::error::Expected seven release packages.'; exit 1; }
+          for platform in win64 win32 linux64 linuxarm linuxarm64 osx64 osx-arm64; do
+            [[ -f "dist/TBot-$VERSION-$platform.zip" ]] || { echo "::error::Missing package for $platform."; exit 1; }
+          done
+          (cd dist && sha256sum TBot-*.zip > SHA256SUMS)
+          cp "docs/releases/$VERSION.md" release-notes.md
+          echo "" >> release-notes.md
+          echo "Source: https://github.com/$GITHUB_REPOSITORY/commit/$GITHUB_SHA" >> release-notes.md
+      - name: Create fork draft prerelease
+        shell: bash
+        run: |
+          # Atomically reserve a new tag at the built commit; existing tags fail.
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$GITHUB_SHA"
+          release_flags=(--draft)
+          # A prerelease author base must remain a GitHub prerelease.
+          if [[ "$VERSION" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
+          gh release create "$RELEASE_TAG" dist/TBot-*.zip dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "TBot $VERSION" --notes-file release-notes.md "${release_flags[@]}"

@@ -25,8 +25,8 @@ namespace TBot.Ogame.Infrastructure.Models {
 				outStr += "P";
 			outStr +=
 				$" \"{Name}\" {otherPlanetId} " +
-				$"Input: M:{input.Metal} C:{input.Crystal} D:{input.Deuterium} " +
-				$"Output: M:{output.Metal} C:{output.Crystal} D:{output.Deuterium}]";
+				$"Input: M:{input?.Metal ?? 0} C:{input?.Crystal ?? 0} D:{input?.Deuterium ?? 0} " +
+				$"Output: M:{output?.Metal ?? 0} C:{output?.Crystal ?? 0} D:{output?.Deuterium ?? 0}]";
 			return outStr;
 		}
 	}

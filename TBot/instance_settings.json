@@ -46,6 +46,11 @@
 			"AutoHarvest": 99
 		}
 	},
+	"DiscordWebhook": {
+		"Active": false,
+		"Url": "",
+		"Username": "TBot"
+	},
 	"SleepMode": {
 		"Active": false,
 		"GoToSleep": "23:15",
@@ -53,6 +58,9 @@
 		"PreventIfThereAreFleets": true,
 		"TelegramMessenger": {
 			"Active": false
+		},
+		"DiscordWebhook": {
+			"Active": true
 		},
 		"AutoFleetSave": {
 			"Active": true,
@@ -108,6 +116,9 @@
 		},
 		"TelegramMessenger": {
 			"Active": false
+		},
+		"DiscordWebhook": {
+			"Active": true
 		},
 		"Alarm": {
 			"Active": true
@@ -356,18 +367,16 @@
             "CheckIntervalMin": 240,
             "CheckIntervalMax": 360
         },
-        "AutoFleepJumpGate": {
+        "AutoFleetJumpGate": {
             "Active": false,
             "CheckIntervalMin": 5,
             "CheckIntervalMax": 10,
-					"Target": [
-						{
-							"Galaxy": 1,
-							"System": 1,
-							"Position": 1,
-							"Type": "Moon"
-						}
-					],
+				"Target": {
+					"Galaxy": 1,
+					"System": 1,
+					"Position": 1,
+					"Type": "Moon"
+				},
             "MinimumAmountOfShipsToBeLeftOnMoon": {
                 "LightFighter": 0,
                 "HeavyFighter": 0,
@@ -453,6 +462,14 @@
 			}
 		],
 		"KeepReportFor": 1440,
+		"KeepReportsWithDefense": true,
+		"AttackDefendedTargets": false,
+		"AttackTargetsWithFleet": false,
+		"IgnoreMissiles": true,
+		"BombersPer100kDefense": 4,
+		"ReapersPer100kFleet": 2,
+		"MaxDefensePoints": 0,
+		"MaxFleetPoints": 0,
 		"NumProbes": 52,
 		"Origin": [
 			{
@@ -476,15 +493,17 @@
 		"MaxWaitTime": 7200,
 		"MinLootFuelRatio": 0.5,
 		"PreferedResource": "",
+		"ProcessAllReports": false,
 		"MaxSlots": 18,
 		"SlotsToLeaveFree": 1,
 		"CheckIntervalMin": 30,
 		"CheckIntervalMax": 60,
+		"DaysToKeepOldSystemData": 7,
+		"EmptySystemCooldownDays": 30,
 		"Blacklist": {
 			"Active": true,
 			"ResetAfterHours": 20,
-			"MinimumResourcesToNotBlacklist": 1000000,
-			"ProcessAllReports": true
+			"MinimumResourcesToNotBlacklist": 1000000
 		},
 		"StopAfterFullScan": true
 	},
@@ -554,6 +573,11 @@
 		"MaxSlots": 5,
 		"MaxFailures": 5,
 		"RandomizeDestination": false,
+		"ArtifactStorage": {
+			"Active": false,
+			"StopAt": 3600,
+			"ResumeBelow": 3000
+		},
 		"CheckIntervalMin": 30,
 		"CheckIntervalMax": 60
 	}

@@ -63,7 +63,7 @@ namespace TBot.Ogame.Infrastructure {
 
 			_ogamedProcess = ExecuteOgamedExecutable(credentials, device, host, port, captchaKey, proxySettings);
 
-			_client = new HttpClient() {
+			_client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) {
 				BaseAddress = new Uri($"http://{host}:{port}/"),
 				Timeout = TimeSpan.FromSeconds(60)
 			};
@@ -251,7 +251,8 @@ namespace TBot.Ogame.Infrastructure {
 			}
 			if (result != null) {
 				if (result.Status == null) {
-					throw new OgamedException("An error has occurred");
+					throw new OgamedException(
+						$"An error has occurred (HTTP {(int) response.StatusCode} {response.ReasonPhrase})");
 				}
 				else if (result.Status != "ok") {
 					throw new OgamedException($"An error has occurred: Status Code: {response.StatusCode} Status: {result?.Status} - Message: {result?.Message}");
@@ -290,17 +291,31 @@ namespace TBot.Ogame.Infrastructure {
 		}
 
 		private async Task<T> PostAsync<T>(string resource, params KeyValuePair<string, string>[] parameters) {
-			var response = await GetRetryPolicy()
-				.ExecuteAsync(async () => {
-					var request = new HttpRequestMessage() {
-						Method = HttpMethod.Post,
-						RequestUri = new Uri(resource, UriKind.Relative)
-					};
-					request.Content = new FormUrlEncodedContent(parameters);
-					var response = await _client.SendAsync(request);
-					return response;
-				});
-			return await ManageResponse<T>(response);
+			return await PostAsyncCore<T>(true, resource, parameters);
+		}
+
+		private async Task<T> PostAsyncNoRetry<T>(string resource, params KeyValuePair<string, string>[] parameters) {
+			return await PostAsyncCore<T>(false, resource, parameters);
+		}
+
+		private async Task<T> PostAsyncCore<T>(bool retry, string resource, KeyValuePair<string, string>[] parameters) {
+			Func<Task<HttpResponseMessage>> send = async () => {
+				var request = new HttpRequestMessage() {
+					Method = HttpMethod.Post,
+					RequestUri = new Uri(resource, UriKind.Relative)
+				};
+				request.Content = new FormUrlEncodedContent(parameters);
+				return await _client.SendAsync(request);
+			};
+
+			var response = retry
+				? await GetRetryPolicy().ExecuteAsync(send)
+				: await send();
+			T result;
+			try { result = await ManageResponse<T>(response); }
+			catch (OgamedException e) { e.StatusCode = response.StatusCode; throw; }
+			if (!retry) response.EnsureSuccessStatusCode();
+			return result;
 		}
 
 		public async Task SetUserAgent(string userAgent) {
@@ -316,11 +331,7 @@ namespace TBot.Ogame.Infrastructure {
 		}
 
 		public async Task<CaptchaChallenge> GetCaptchaChallenge() {
-			try {
-				return await GetAsync<CaptchaChallenge>("/bot/captcha/challenge");
-			} catch {
-				return new CaptchaChallenge();
-			}
+			return await GetAsync<CaptchaChallenge>("/bot/captcha/challenge");
 		}
 
 		public async Task SolveCaptcha(string challengeID, int answer) {
@@ -753,6 +764,10 @@ namespace TBot.Ogame.Infrastructure {
 			return await GetAsync<LFTechs>($"/bot/planets/{celestial.ID}/lifeform-techs");
 		}
 
+		public async Task<ArtifactInventory> GetArtifactInventory(Celestial celestial) {
+			return await GetAsync<ArtifactInventory>($"/bot/planets/{celestial.ID}/artifacts");
+		}
+
 		public async Task<Facilities> GetFacilities(Celestial celestial) {
 			return await GetAsync<Facilities>($"/bot/planets/{celestial.ID}/facilities");
 		}
@@ -897,7 +912,9 @@ namespace TBot.Ogame.Infrastructure {
 				parameters.Add(new KeyValuePair<string, string>("deuterium", payload.Deuterium.ToString()));
 				parameters.Add(new KeyValuePair<string, string>("food", payload.Food.ToString()));
 
-				return await PostAsync<Fleet>($"/bot/planets/{origin.ID}/send-fleet", parameters.ToArray());
+				var fleet = await PostAsyncNoRetry<Fleet>($"/bot/planets/{origin.ID}/send-fleet", parameters.ToArray());
+				if (fleet == null) throw new InvalidOperationException("Fleet response contains no movement.");
+				return fleet;
 			} catch (OgamedException e) when (e.Message.Contains("no ships to send")) {
 				return null;
 			}
@@ -987,6 +1004,11 @@ namespace TBot.Ogame.Infrastructure {
 			return await GetAsync<List<EspionageReportSummary>>("/bot/espionage-report");
 		}
 
+		public async Task<List<EspionageReportSummary>> GetEspionageReportsPage(int page) {
+			page = Math.Max(1, page);
+			return await GetAsync<List<EspionageReportSummary>>($"/bot/espionage-report?page={page}");
+		}
+
 		public async Task<EspionageReport> GetEspionageReport(Coordinate coordinate) {
 			return await GetAsync<EspionageReport>($"/bot/espionage-report/{coordinate.Galaxy}/{coordinate.System}/{coordinate.Position}");
 		}
@@ -1032,21 +1054,35 @@ namespace TBot.Ogame.Infrastructure {
 			return phalanxedFleets;
 		}
 		public async Task<bool> SendDiscovery(Celestial origin, Coordinate coords) {
-			bool success = false;
-			try {
-				List<KeyValuePair<string, string>> parameters = new List<KeyValuePair<string, string>>();
-				parameters.Add(new KeyValuePair<string, string>("galaxy", coords.Galaxy.ToString()));
-				parameters.Add(new KeyValuePair<string, string>("system", coords.System.ToString()));
-				parameters.Add(new KeyValuePair<string, string>("position", coords.Position.ToString()));
-				success = await PostAsync<bool>($"/bot/planets/{origin.ID}/send-discovery", parameters.ToArray());
-			} catch (HttpRequestException e) when (e.StatusCode == HttpStatusCode.BadRequest) {
-				success = false;
-			} catch (OgamedException e) {
-				success = false;
-			} catch (Exception e) {
-				success = false;
-			}
-			return success;
+			List<KeyValuePair<string, string>> parameters = new List<KeyValuePair<string, string>>();
+			parameters.Add(new KeyValuePair<string, string>("galaxy", coords.Galaxy.ToString()));
+			parameters.Add(new KeyValuePair<string, string>("system", coords.System.ToString()));
+			parameters.Add(new KeyValuePair<string, string>("position", coords.Position.ToString()));
+			// This POST changes the game state. Retrying a 408/429/5xx here can
+			// duplicate a discovery because the server may have accepted the first
+			// request before the transport reported the failure. The wrapper is
+			// responsible for reconciling its own ambiguous OGame response.
+			return await PostAsyncNoRetry<bool>($"/bot/planets/{origin.ID}/send-discovery", parameters.ToArray());
+		}
+
+		public async Task<BoundedDiscoveryResult> SendBoundedSystemDiscovery(Celestial origin, int galaxy, int system, int maxFleets, IReadOnlyList<int> positions) {
+			if (origin == null || galaxy <= 0 || system <= 0 || maxFleets <= 0 || maxFleets > 15 ||
+				positions == null || positions.Count == 0 || positions.Count > maxFleets ||
+				positions.Any(position => position < 1 || position > 15) || positions.Distinct().Count() != positions.Count)
+				throw new ArgumentException("A bounded discovery request requires unique reserved positions and a valid maximum fleet count.");
+			return await PostAsyncNoRetry<BoundedDiscoveryResult>($"/bot/planets/{origin.ID}/send-system-discovery-bounded",
+				new("galaxy", galaxy.ToString()), new("system", system.ToString()),
+				new("maxFleets", maxFleets.ToString()), new("positions", string.Join(",", positions)));
+		}
+
+		public async Task<List<Coordinate>> SendSystemDiscovery(Celestial origin, int galaxy, int system) {
+			if (origin?.ID <= 0)
+				throw new ArgumentException("A valid discovery origin is required.", nameof(origin));
+
+			return await PostAsyncNoRetry<List<Coordinate>>(
+				$"/bot/planets/{origin.ID}/send-system-discovery",
+				new KeyValuePair<string, string>("galaxy", galaxy.ToString()),
+				new KeyValuePair<string, string>("system", system.ToString()));
 		}
 
 		        public async Task<List<Coordinate>> GetPositionsAvailableForDiscoveryFleet(Celestial celestial, Coordinate coordinate) {
@@ -1055,10 +1091,6 @@ namespace TBot.Ogame.Infrastructure {
             parameters.Add(new KeyValuePair<string, string>("system", coordinate.System.ToString()));
             parameters.Add(new KeyValuePair<string, string>("position", coordinate.Position.ToString()));
             return await PostAsync<List<Coordinate>>($"/bot/planets/{celestial.ID}/get-system-available-discovery", parameters.ToArray());
-        }
-
-        public async Task<int> GetAvailableDiscoveries() {
-            return await GetAsync<int>("/bot/get-available-discoveries");
         }
 
         public async Task<int> GetAvailableDiscoveries(Celestial celestial) {

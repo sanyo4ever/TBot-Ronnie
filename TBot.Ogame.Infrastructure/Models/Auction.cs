@@ -25,8 +25,8 @@ namespace TBot.Ogame.Infrastructure.Models {
 		public long TotalResourcesOffered {
 			get {
 				long sum = 0;
-				foreach (var item in Resources) {
-					sum += item.Value.output.TotalResources;
+				foreach (var item in Resources ?? new Dictionary<string, AuctionResourcesValue>()) {
+					sum += item.Value?.output?.TotalResources ?? 0;
 				}
 
 				return sum;
@@ -48,7 +48,7 @@ namespace TBot.Ogame.Infrastructure.Models {
 						$"CurrentBid: {CurrentBid} by \"{HighestBidder}\" (ID:{HighestBidderUserID}). \n" +
 						$"AlreadyBid: {AlreadyBid} MinimumBid: {MinimumBid}. \n" +
 						$"To enter we must bid \"{MinimumBid - AlreadyBid}\"\n" +
-						$"Resource Multiplier: M:{ResourceMultiplier.Metal} C:{ResourceMultiplier.Crystal} D:{ResourceMultiplier.Deuterium}\n" +
+				$"Resource Multiplier: M:{ResourceMultiplier?.Metal ?? 0} C:{ResourceMultiplier?.Crystal ?? 0} D:{ResourceMultiplier?.Deuterium ?? 0}\n" +
 						$"Number of Bids: {NumBids}.";
 			}
 		}

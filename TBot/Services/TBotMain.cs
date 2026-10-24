@@ -41,6 +41,7 @@ namespace Tbot.Services {
 		private readonly SemaphoreSlim _settingsReloadSemaphore = new SemaphoreSlim(1, 1);
 
 		private ITelegramMessenger telegramMessenger;
+		private IDiscordWebhookMessenger discordWebhookMessenger;
 
 		private bool loggedIn = false;
 		private Dictionary<string, Timer> timers = new();
@@ -197,17 +198,18 @@ namespace Tbot.Services {
 		private async Task ResolveCaptcha() {
 
 			var captchaChallenge = await _ogameService.GetCaptchaChallenge();
-			if (captchaChallenge.Id.Length == 0) {
+			if (string.IsNullOrWhiteSpace(captchaChallenge?.Id)) {
 				log(LogLevel.Warning, LogSender.Tbot, "No captcha found. Unable to login.");
 				log(LogLevel.Warning, LogSender.Tbot, "Please check your credentials, language and universe name.");
 				log(LogLevel.Warning, LogSender.Tbot, "If your credentials are correct try refreshing your IP address.");
 				log(LogLevel.Warning, LogSender.Tbot, "If you are using a proxy, a VPN or hosting TBot on a VPS, be warned that Ogame blocks datacenters' IPs. You probably need a residential proxy.");
+				throw new UnableToLoginException("Unable to login: Gameforge did not return a CAPTCHA challenge.");
 			} else {
 				log(LogLevel.Information, LogSender.Tbot, "Trying to solve captcha...");
-				int answer = 0;
-				if (captchaChallenge.Icons != "" && captchaChallenge.Question != "" && captchaChallenge.Icons != null && captchaChallenge.Question != null) {
-					answer = OgameCaptchaSolver.GetCapcthaSolution(captchaChallenge.Icons, captchaChallenge.Question);
-				}
+				if (string.IsNullOrWhiteSpace(captchaChallenge.Icons) || string.IsNullOrWhiteSpace(captchaChallenge.Question))
+					throw new UnableToLoginException("The CAPTCHA challenge did not contain both images.");
+
+				int answer = OgameCaptchaSolver.GetCaptchaSolution(captchaChallenge.Icons, captchaChallenge.Question);
 				await _ogameService.SolveCaptcha(captchaChallenge.Id, answer);
 				await Task.Delay(RandomizeHelper.CalcRandomInterval(IntervalType.AFewSeconds));
 				await _ogameService.Login();
@@ -230,6 +232,33 @@ namespace Tbot.Services {
 			log(LogLevel.Information, LogSender.Tbot, $"Player rank: {userData.userInfo.Rank}");
 			log(LogLevel.Information, LogSender.Tbot, $"Player points: {userData.userInfo.Points}");
 			log(LogLevel.Information, LogSender.Tbot, $"Player honour points: {userData.userInfo.HonourPoints}");
+		}
+
+		private void ConfigureDiscordWebhook() {
+			discordWebhookMessenger = null;
+
+			try {
+				if (!SettingsService.IsSettingSet(InstanceSettings, "DiscordWebhook") ||
+					!SettingsService.IsSettingSet(InstanceSettings.DiscordWebhook, "Active") ||
+					!(bool)InstanceSettings.DiscordWebhook.Active)
+					return;
+
+				string webhookUrl = (string)InstanceSettings.DiscordWebhook.Url;
+				if (string.IsNullOrWhiteSpace(webhookUrl)) {
+					log(LogLevel.Warning, LogSender.Tbot,
+						"Discord webhook is active but no URL is configured. Discord notifications are disabled.");
+					return;
+				}
+
+				string username = SettingsService.IsSettingSet(InstanceSettings.DiscordWebhook, "Username")
+					? (string)InstanceSettings.DiscordWebhook.Username
+					: "TBot";
+				discordWebhookMessenger = new DiscordWebhookMessenger(webhookUrl, username);
+				log(LogLevel.Information, LogSender.Tbot, "Discord webhook notifications enabled.");
+			} catch (Exception exception) {
+				log(LogLevel.Warning, LogSender.Tbot,
+					$"Unable to configure Discord webhook. Discord notifications are disabled: {exception.Message}");
+			}
 		}
 
 		public async Task Init(string settingPath,
@@ -300,6 +329,8 @@ namespace Tbot.Services {
 				InstanceSettings = await SettingsService.GetSettings(InstanceSettingsPath);
 			}
 
+			ConfigureDiscordWebhook();
+
 			// SleepMode will know if features must be enabled or not
 			InitializeSleepMode();
 
@@ -319,6 +350,7 @@ namespace Tbot.Services {
 				log(LogLevel.Information, LogSender.Tbot, "Removing instance from telegram...");
 				await telegramMessenger.RemoveTBotInstance(this);
 			}
+			discordWebhookMessenger = null;
 
 			// Deinitialize workers
 			List<Task> deInitTasks = new();
@@ -548,6 +580,7 @@ namespace Tbot.Services {
 
 				log(LogLevel.Information, LogSender.Tbot, "Reloading Settings file");
 				InstanceSettings = await SettingsService.GetSettings(InstanceSettingsPath);
+				ConfigureDiscordWebhook();
 
 				cts = new();
 				// If wakeUp, then all features will be restored
@@ -577,7 +610,7 @@ namespace Tbot.Services {
 		}
 		public async Task ListRunningProfiles() {
 			List<string> profiles = userData.runningProfiles;
-			if (profiles.Count <= 0 || profiles == null) {
+			if (profiles == null || profiles.Count <= 0) {
 				await SendTelegramMessage("No profile is currently running.");
 				return;
 			}
@@ -704,12 +737,57 @@ namespace Tbot.Services {
 			}
 		}
 
-		public async Task SendTelegramMessage(string fmt) {
-			// We may consider any filter logic to be put here IE telegram notification disabled from settings
-			if (telegramMessenger != null) {
-				string finalStr = $"<code>[{userData.userInfo.PlayerName}@{userData.serverData.Name}]</code>\n" +
-					fmt;
+		public Task SendTelegramMessage(string fmt) {
+			return SendNotificationMessage(fmt, null);
+		}
+
+		public Task SendFeatureNotification(dynamic featureSettings, string fmt, NotificationKind kind = NotificationKind.Information) {
+			return SendNotificationMessage(fmt, featureSettings, kind);
+		}
+
+		private async Task SendNotificationMessage(string fmt, dynamic featureSettings, NotificationKind kind = NotificationKind.Information) {
+			bool sendTelegram = telegramMessenger != null &&
+				(featureSettings == null || IsFeatureChannelActive(featureSettings, "TelegramMessenger"));
+			bool sendDiscord = discordWebhookMessenger != null &&
+				(featureSettings == null || IsFeatureDiscordActive(featureSettings));
+
+			if (!sendTelegram && !sendDiscord)
+				return;
+
+			string playerName = userData?.userInfo?.PlayerName ?? "Unknown";
+			string universeName = userData?.serverData?.Name ?? "Unknown";
+			string finalStr = $"<code>[{playerName}@{universeName}]</code>\n" + fmt;
+
+			if (sendTelegram)
 				await telegramMessenger.SendMessage(finalStr);
+
+			if (sendDiscord) {
+				try {
+					await discordWebhookMessenger.SendMessage(finalStr, kind);
+				} catch (Exception exception) {
+					log(LogLevel.Warning, LogSender.Tbot,
+						$"Unable to send Discord notification: {exception.Message}");
+				}
+			}
+		}
+
+		private static bool IsFeatureChannelActive(dynamic featureSettings, string channelName) {
+			try {
+				return SettingsService.IsSettingSet(featureSettings, channelName) &&
+					SettingsService.IsSettingSet(featureSettings[channelName], "Active") &&
+					(bool)featureSettings[channelName].Active;
+			} catch {
+				return false;
+			}
+		}
+
+		private static bool IsFeatureDiscordActive(dynamic featureSettings) {
+			try {
+				if (!SettingsService.IsSettingSet(featureSettings, "DiscordWebhook"))
+					return true;
+				return IsFeatureChannelActive(featureSettings, "DiscordWebhook");
+			} catch {
+				return false;
 			}
 		}
 
@@ -768,19 +846,58 @@ namespace Tbot.Services {
 			return;
 		}
 
+		private static long AuctionPoints(AuctionInputOutput input, AuctionResourceMultiplier multiplier) {
+			if (input == null || multiplier == null || multiplier.Metal <= 0 || multiplier.Crystal <= 0 || multiplier.Deuterium <= 0)
+				return 0;
+
+			return (long)Math.Round(
+				input.Metal / multiplier.Metal +
+				input.Crystal / multiplier.Crystal +
+				input.Deuterium / multiplier.Deuterium,
+				MidpointRounding.AwayFromZero);
+		}
+
+		private static Resources BuildMinimumAuctionBid(long requiredPoints, Resources available, AuctionResourceMultiplier multiplier) {
+			var result = new Resources();
+			if (requiredPoints <= 0 || available == null || multiplier == null)
+				return result;
+
+			long remaining = requiredPoints;
+			foreach (var resource in new[] {
+				("Metal", available.Metal, (decimal)multiplier.Metal),
+				("Crystal", available.Crystal, (decimal)multiplier.Crystal),
+				("Deuterium", available.Deuterium, (decimal)multiplier.Deuterium)
+			}) {
+				if (remaining <= 0 || resource.Item3 <= 0)
+					continue;
+
+				var amount = Math.Min(resource.Item2, (long)Math.Ceiling(remaining / resource.Item3));
+				if (resource.Item1 == "Metal") result.Metal = amount;
+				if (resource.Item1 == "Crystal") result.Crystal = amount;
+				if (resource.Item1 == "Deuterium") result.Deuterium = amount;
+				remaining -= (long)Math.Round(amount * resource.Item3, MidpointRounding.AwayFromZero);
+			}
+
+			return remaining <= 0 ? result : new Resources();
+		}
+
 		public async Task TelegramGetCurrentAuction() {		
 			Auction auction;
 			try {
 				auction = await _ogameService.GetCurrentAuction();
+				if (auction == null) {
+					await SendTelegramMessage("Auction data is unavailable.");
+					return;
+				}
 				string outStr = "";
 				if (auction.TotalResourcesOffered > 0) {
 					outStr += "Offerings: \n";
 					// Find from which planet we have put resources
-					foreach (var item in auction.Resources) {
+					foreach (var item in auction.Resources ?? new Dictionary<string, AuctionResourcesValue>()) {
 						string planetIdString = item.Key;
 						AuctionResourcesValue value = item.Value;
 
-						if (value.output.TotalResources > 0) {
+						if (value?.output?.TotalResources > 0) {
 							outStr += $"\t\"{value.Name}\" ID:{planetIdString} {value.output.ToString()} \n";
 						}
 					}
@@ -828,6 +945,87 @@ namespace Tbot.Services {
 		}
 
 		public async Task TelegramBidAuctionMinimum() {
+			Auction auction;
+			try {
+				auction = await _ogameService.GetCurrentAuction();
+			} catch (Exception e) {
+				await SendTelegramMessage($"Unable to read the current auction: {e.Message}");
+				return;
+			}
+
+			if (auction == null || auction.HasFinished) {
+				await SendTelegramMessage("No auction in progress!");
+				return;
+			}
+			if (userData.userInfo.PlayerID == auction.HighestBidderUserID) {
+				await SendTelegramMessage("Auction is already ours!\n" +
+					$"Item: \"{auction.CurrentItem}\"\n" +
+					$"Ending in: {auction.GetTimeString()}");
+				return;
+			}
+
+			var multiplier = auction.ResourceMultiplier;
+			var entries = (auction.Resources ?? new Dictionary<string, AuctionResourcesValue>())
+				.Select(item => new { item, validId = Int32.TryParse(item.Key, out var id), id })
+				.Where(item => item.validId && item.item.Value?.input != null)
+				.ToList();
+			if (multiplier == null || multiplier.Metal <= 0 || multiplier.Crystal <= 0 || multiplier.Deuterium <= 0 || entries.Count == 0) {
+				await SendTelegramMessage("Auction data is incomplete; no bid was sent.");
+				return;
+			}
+
+			long minBidRequired = Math.Max(0, (long)auction.MinimumBid - auction.AlreadyBid);
+			var defaultCelestial = UserData.celestials?.Unique().FirstOrDefault(celestial => {
+				try {
+					var target = InstanceSettings.Brain.AutoRepatriate.Target;
+					return celestial?.Coordinate?.IsSame(new Coordinate {
+						Galaxy = (int)target.Galaxy,
+						System = (int)target.System,
+						Position = (int)target.Position,
+						Type = Enum.Parse<Celestials>((string)target.Type)
+					}) == true;
+				} catch {
+					return false;
+				}
+			});
+
+			var selected = defaultCelestial == null
+				? null
+				: entries.FirstOrDefault(entry => entry.id == defaultCelestial.ID);
+			if (selected == null || AuctionPoints(selected.item.Value.input, multiplier) < minBidRequired)
+				selected = entries.FirstOrDefault(entry => AuctionPoints(entry.item.Value.input, multiplier) >= minBidRequired);
+
+			if (selected == null) {
+				await SendTelegramMessage(
+					$"No celestial with minimum required resources found!\nResource Multiplier: M:{multiplier.Metal} C:{multiplier.Crystal} D:{multiplier.Deuterium}.\nDoing nothing...");
+				return;
+			}
+
+			var input = selected.item.Value.input;
+			var celestial = UserData.celestials?.Unique().FirstOrDefault(item => item?.ID == selected.id)
+				?? new Celestial { ID = selected.id, Name = selected.item.Value.Name };
+			celestial.Name ??= selected.item.Value.Name;
+			celestial.Resources = new Resources {
+				Metal = input.Metal,
+				Crystal = input.Crystal,
+				Deuterium = input.Deuterium
+			};
+
+			var bid = BuildMinimumAuctionBid(minBidRequired, celestial.Resources, multiplier);
+			if (bid.TotalResources <= 0 || AuctionPoints(new AuctionInputOutput {
+				Metal = bid.Metal, Crystal = bid.Crystal, Deuterium = bid.Deuterium
+			}, multiplier) < minBidRequired) {
+				await SendTelegramMessage("Cannot build a valid minimum bid from the available resources. Try again later.");
+				return;
+			}
+
+			await SendTelegramMessage(
+				$"Bidding Auction with M:{bid.Metal} C:{bid.Crystal} D:{bid.Deuterium}\n" +
+				$"From {celestial.Name} ID:{celestial.ID}");
+			await TelegramBidAuction(celestial, bid);
+		}
+
+		private async Task TelegramBidAuctionMinimumLegacy() {
 			var auction = await _ogameService.GetCurrentAuction();
 			if (auction.HasFinished) {
 				await SendTelegramMessage("No auction in progress!");
@@ -961,6 +1159,10 @@ namespace Tbot.Services {
 		}
 
 		public async Task TelegramBidAuction(Celestial celestial, Resources res) {
+			if (celestial == null || celestial.ID <= 0 || res == null || res.TotalResources <= 0) {
+				await SendTelegramMessage("Bid rejected: invalid celestial or resource amount.");
+				return;
+			}
 			log(LogLevel.Information, LogSender.Tbot, $"Bidding auction with {celestial.Name} {res.ToString()}");
 			try {
 				await _ogameService.DoAuction(celestial, res);
@@ -1446,9 +1648,9 @@ namespace Tbot.Services {
 							timers.GetValueOrDefault("SleepModeTimer").Change(interval, Timeout.Infinite);
 							delayed = true;
 							log(LogLevel.Information, LogSender.SleepMode, $"Fleets active, Next check at {newTime.ToString()}");
-							if ((bool) InstanceSettings.SleepMode.TelegramMessenger.Active) {
-								await SendTelegramMessage($"Fleets active, Next check at {newTime.ToString()}");
-							}
+							await SendFeatureNotification(InstanceSettings.SleepMode,
+								$"Fleets active, Next check at {newTime.ToString()}",
+								NotificationKind.SleepMode);
 						}
 					} else {
 						log(LogLevel.Warning, LogSender.SleepMode, "Unable to parse WakeUp or GoToSleep time.");
@@ -1471,9 +1673,10 @@ namespace Tbot.Services {
 						}
 					}
 
-					if ((bool) InstanceSettings.SleepMode.TelegramMessenger.Active && state != null) {
-						await SendTelegramMessage($"Going to sleep, Waking Up at {state.ToString()}");
-					}
+					if (state != null)
+						await SendFeatureNotification(InstanceSettings.SleepMode,
+							$"Going to sleep, Waking Up at {state.ToString()}",
+							NotificationKind.SleepMode);
 					if (userData.isSleeping == false) {
 						/* remove?
 						if (
@@ -1542,9 +1745,9 @@ namespace Tbot.Services {
 		private async Task WakeUpAsync(object state) {
 			try {
 				log(LogLevel.Information, LogSender.SleepMode, "Waking Up...");
-				if ((bool) InstanceSettings.SleepMode.TelegramMessenger.Active && state != null) {
-					await SendTelegramMessage($"Waking up");
-					await SendTelegramMessage($"Going to sleep at {state.ToString()}");
+				if (state != null) {
+					await SendFeatureNotification(InstanceSettings.SleepMode, "Waking up", NotificationKind.SleepMode);
+					await SendFeatureNotification(InstanceSettings.SleepMode, $"Going to sleep at {state.ToString()}", NotificationKind.SleepMode);
 				}
 				if (userData.isSleeping) {
 					userData.isSleeping = false;

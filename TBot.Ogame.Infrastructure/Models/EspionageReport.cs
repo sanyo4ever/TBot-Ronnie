@@ -114,52 +114,86 @@ namespace TBot.Ogame.Infrastructure.Models {
 		/// <returns>Returns true if the target is defenceless, false otherwise.</returns>
 		public bool IsDefenceless(bool isUsingProbes = false) {
 			if (HasDefensesInformation && HasFleetInformation && !isUsingProbes) {
-				return LightFighter == null
-					&& HeavyFighter == null
-					&& Cruiser == null
-					&& Battleship == null
-					&& Battlecruiser == null
-					&& Bomber == null
-					&& Destroyer == null
-					&& Deathstar == null
-					&& SmallCargo == null
-					&& LargeCargo == null
-					&& Recycler == null
-					&& Reaper == null
-					&& Pathfinder == null
-					&& RocketLauncher == null
-					&& LightLaser == null
-					&& HeavyLaser == null
-					&& GaussCannon == null
-					&& IonCannon == null
-					&& PlasmaTurret == null
-					&& SmallShieldDome == null
-					&& LargeShieldDome == null;
+				return !HasShipOrDefence(
+					LightFighter, HeavyFighter, Cruiser, Battleship, Battlecruiser,
+					Bomber, Destroyer, Deathstar, SmallCargo, LargeCargo, Recycler,
+					Reaper, Pathfinder, RocketLauncher, LightLaser, HeavyLaser,
+					GaussCannon, IonCannon, PlasmaTurret, SmallShieldDome, LargeShieldDome);
 			} else if (HasDefensesInformation && HasFleetInformation && isUsingProbes) {
-				return SolarSatellite == null
-					&& LightFighter == null
-					&& HeavyFighter == null
-					&& Cruiser == null
-					&& Battleship == null
-					&& Battlecruiser == null
-					&& Bomber == null
-					&& Destroyer == null
-					&& Deathstar == null
-					&& SmallCargo == null
-					&& LargeCargo == null
-					&& Recycler == null
-					&& Reaper == null
-					&& Pathfinder == null
-					&& RocketLauncher == null
-					&& LightLaser == null
-					&& HeavyLaser == null
-					&& GaussCannon == null
-					&& IonCannon == null
-					&& PlasmaTurret == null
-					&& SmallShieldDome == null
-					&& LargeShieldDome == null;
+				return !HasShipOrDefence(
+					SolarSatellite, LightFighter, HeavyFighter, Cruiser, Battleship,
+					Battlecruiser, Bomber, Destroyer, Deathstar, SmallCargo, LargeCargo,
+					Recycler, Reaper, Pathfinder, RocketLauncher, LightLaser, HeavyLaser,
+					GaussCannon, IonCannon, PlasmaTurret, SmallShieldDome, LargeShieldDome);
 			}
 			return false;
+		}
+
+		/// <summary>
+		/// Returns whether the report contains at least one actual defensive
+		/// structure. This deliberately excludes ships: AutoFarm may reject a
+		/// target because of fleet ships, but the manual-review retention option
+		/// is specifically about keeping reports with planetary defences.
+		/// </summary>
+		public bool HasDefensiveStructures() {
+			return HasDefensiveStructures(true);
+		}
+
+		public bool HasDefensiveStructures(bool includeMissiles) {
+			if (!HasDefensesInformation)
+				return false;
+
+			var hasStructures = HasShipOrDefence(
+				RocketLauncher, LightLaser, HeavyLaser, GaussCannon, IonCannon,
+				PlasmaTurret, SmallShieldDome, LargeShieldDome);
+			return includeMissiles
+				? hasStructures || HasShipOrDefence(AntiBallisticMissiles, InterplanetaryMissiles)
+				: hasStructures;
+		}
+
+		public long GetDefensePoints(bool includeMissiles = true) {
+			return new Defences(
+				RocketLauncher.GetValueOrDefault(),
+				LightLaser.GetValueOrDefault(),
+				HeavyLaser.GetValueOrDefault(),
+				GaussCannon.GetValueOrDefault(),
+				IonCannon.GetValueOrDefault(),
+				PlasmaTurret.GetValueOrDefault(),
+				SmallShieldDome.GetValueOrDefault(),
+				LargeShieldDome.GetValueOrDefault(),
+				includeMissiles ? AntiBallisticMissiles.GetValueOrDefault() : 0,
+				includeMissiles ? InterplanetaryMissiles.GetValueOrDefault() : 0).GetDefencePoints();
+		}
+
+		public long GetFleetPoints() {
+			return new Ships(
+				lightFighter: LightFighter.GetValueOrDefault(),
+				heavyFighter: HeavyFighter.GetValueOrDefault(),
+				cruiser: Cruiser.GetValueOrDefault(),
+				battleship: Battleship.GetValueOrDefault(),
+				battlecruiser: Battlecruiser.GetValueOrDefault(),
+				bomber: Bomber.GetValueOrDefault(),
+				destroyer: Destroyer.GetValueOrDefault(),
+				deathstar: Deathstar.GetValueOrDefault(),
+				smallCargo: SmallCargo.GetValueOrDefault(),
+				largeCargo: LargeCargo.GetValueOrDefault(),
+				colonyShip: ColonyShip.GetValueOrDefault(),
+				recycler: Recycler.GetValueOrDefault(),
+				espionageProbe: EspionageProbe.GetValueOrDefault(),
+				reaper: Reaper.GetValueOrDefault(),
+				pathfinder: Pathfinder.GetValueOrDefault()).GetFleetPoints();
+		}
+
+		public bool HasInvalidThreatCounts() => new long?[] {
+			SolarSatellite, LightFighter, HeavyFighter, Cruiser, Battleship, Battlecruiser,
+			Bomber, Destroyer, Deathstar, SmallCargo, LargeCargo, ColonyShip, Recycler,
+			EspionageProbe, Crawler, Reaper, Pathfinder, RocketLauncher, LightLaser,
+			HeavyLaser, GaussCannon, IonCannon, PlasmaTurret, SmallShieldDome,
+			LargeShieldDome, AntiBallisticMissiles, InterplanetaryMissiles
+		}.Any(amount => amount < 0);
+
+		private static bool HasShipOrDefence(params long?[] amounts) {
+			return amounts.Any(amount => amount.GetValueOrDefault() != 0);
 		}
 
 		/// <summary>
