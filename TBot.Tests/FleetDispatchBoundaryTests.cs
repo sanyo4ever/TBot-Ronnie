@@ -17,6 +17,49 @@ namespace TBot.Tests;
 
 public class FleetDispatchBoundaryTests {
     [Fact]
+    public async Task Fleet_save_result_cannot_claim_a_prior_workers_reconciled_dispatch() {
+        using var f = new Fixture();
+        f.Origin.Ships = f.Ships;
+        f.Destination.Type = Celestials.Moon;
+        f.Data.celestials = new() { f.Origin, new Moon { ID = 102, Coordinate = f.Destination } };
+        f.FleetSaveFuelCapacity = 100000;
+        Assert.Equal((int)SendFleetCode.AmbiguousDispatch, await f.Send(Missions.Deploy));
+        var priorWorkersFleet = f.Movement(881003);
+        priorWorkersFleet.Mission = Missions.Deploy;
+        priorWorkersFleet.BackTime = DateTime.UtcNow.AddHours(1);
+        f.AfterSend.Add(priorWorkersFleet);
+        Assert.Null(await f.SaveWithResult());
+        Assert.Equal(1, f.Posts);
+    }
+
+    [Theory]
+    [InlineData("accepted")]
+    [InlineData("accepted-followup-fails")]
+    [InlineData("reconciled")]
+    [InlineData("uncertain")]
+    [InlineData("no-ships")]
+    public async Task Fleet_save_result_identifies_only_a_confirmed_dispatch_from_that_save(string outcome) {
+        using var f = new Fixture();
+        f.Origin.Ships = outcome == "no-ships" ? new Ships() : f.Ships;
+        f.Destination.Type = Celestials.Moon;
+        f.Data.celestials = new() { f.Origin, new Moon { ID = 102, Coordinate = f.Destination } };
+        f.FleetSaveFuelCapacity = 100000;
+        f.BeforeSend.Add(f.Movement(881001));
+        if (outcome.StartsWith("accepted") || outcome == "reconciled") {
+            var dispatched = f.Movement(881002);
+            dispatched.Mission = Missions.Deploy;
+            if (outcome != "accepted-followup-fails") dispatched.BackTime = DateTime.UtcNow.AddHours(1);
+            if (outcome == "reconciled") f.AfterSend.Add(dispatched);
+            else {
+                f.Status = HttpStatusCode.OK;
+                f.Body = JsonConvert.SerializeObject(new { status = "ok", result = dispatched });
+            }
+        }
+        Assert.Equal(outcome.StartsWith("accepted") || outcome == "reconciled" ? 881002 : (int?)null, await f.SaveWithResult());
+        Assert.Equal(outcome == "no-ships" ? 0 : 1, f.Posts);
+    }
+
+    [Fact]
     public async Task A_later_request_with_changed_ships_cannot_reconcile_the_original_uncertain_action() {
         using var f = new Fixture();
         Assert.Equal((int)SendFleetCode.AmbiguousDispatch, await f.Send());
@@ -216,6 +259,7 @@ public class FleetDispatchBoundaryTests {
         public List<Fleet> AfterSend = new();
         public int Posts;
         public bool FailSlotRefresh;
+        public long FleetSaveFuelCapacity;
         private int slotReads;
         public HttpStatusCode Status = HttpStatusCode.InternalServerError;
         public string Body = "{\"status\":\"error\",\"message\":\"response lost after acceptance\"}";
@@ -235,13 +279,19 @@ public class FleetDispatchBoundaryTests {
             scheduler = CreateScheduler(service);
         }
         public Fleet Movement(int id) => new() { ID = id, Origin = Origin.Coordinate, Destination = Destination, Mission = Missions.Attack, Ships = Ships, Resources = new() };
-        public Task<int> Send() => scheduler.SendFleet(Origin, Ships, Destination, Missions.Attack, Speeds.HundredPercent, new Resources());
+        public Task<int> Send(Missions mission = Missions.Attack) => scheduler.SendFleet(Origin, Ships, Destination, mission, Speeds.HundredPercent, new Resources());
+        public Task<int?> SaveWithResult() {
+            var method = typeof(FleetScheduler).GetMethod("AutoFleetSaveWithResult");
+            Assert.NotNull(method);
+            return (Task<int?>)method.Invoke(scheduler, new object[] { Origin, 30L });
+        }
         public FleetScheduler CreateScheduler(IOgameService ogame) {
-            var settings = SettingsService.GetMergedSettingsFromContents("{\"General\":{\"SlotsToLeaveFree\":0},\"SleepMode\":{\"Active\":false}}", new List<string> { "{}" });
+            var settings = SettingsService.GetMergedSettingsFromContents("{\"General\":{\"SlotsToLeaveFree\":0},\"SleepMode\":{\"Active\":false,\"AutoFleetSave\":{\"DeutToLeave\":0,\"Recall\":false,\"DefaultMission\":\"Deploy\"}}}", new List<string> { "{}" });
             var parent = AuditProxy<ITBotMain>.Make((method, _) => method.Name switch { "get_InstanceSettings" => (object)settings, "get_InstanceAlias" => "offline-fleets", "get_UserData" => Data, _ => AuditProxy<ITBotMain>.Default(method.ReturnType) });
             var calc = AuditProxy<ICalculationService>.Make((method, _) => method.Name switch {
                 nameof(ICalculationService.GetValidSpeedsForClass) => new List<decimal> { Speeds.HundredPercent },
                 nameof(ICalculationService.CalcFleetPrediction) => new FleetPrediction { Time = 60, Fuel = 10 },
+                nameof(ICalculationService.CalcFleetFuelCapacity) => FleetSaveFuelCapacity,
                 _ => AuditProxy<ICalculationService>.Default(method.ReturnType)
             });
             var bridge = AuditProxy<ITBotOgamedBridge>.Make((method, args) => method.Name switch {

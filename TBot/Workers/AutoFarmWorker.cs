@@ -1820,15 +1820,16 @@ namespace Tbot.Workers {
 			var report = await _ogameService.GetEspionageReport(summary.ID);
 			// Scope must be established before age/malformed cleanup. Manual reports
 			// may be expired too, but owned-only AutoFarm must leave them alone.
-			if (!processAllReports && !(summary.Target != null &&
-				(_tbotInstance.UserData.farmTargets ?? new List<FarmTarget>())
-					.Any(target => target?.HasCoords(summary.Target) == true))) {
-				return (true, true);
+			if (!processAllReports) {
+				var summaryTarget = summary.Target == null ? null :
+					(_tbotInstance.UserData.farmTargets ?? new List<FarmTarget>())
+						.FirstOrDefault(target => target?.HasCoords(summary.Target) == true);
+				if (!AutoFarmReportPolicy.IsOwnedByAutoFarm(summaryTarget,
+					new EspionageReport { ID = summary.ID }, false))
+					return (true, true);
 			}
 			if (report == null || report.ID <= 0 || report.Coordinate == null) {
-				var malformedReport = report ?? new EspionageReport { ID = summary.ID };
-				if (malformedReport.ID <= 0)
-					malformedReport.ID = summary.ID;
+				var malformedReport = new EspionageReport { ID = summary.ID, Coordinate = summary.Target };
 				RecordProcessedReport(malformedReport, "Malformed");
 				_tbotInstance.log(LogLevel.Warning, LogSender.AutoFarm,
 					$"Ignoring malformed espionage report {summary.ID}: no coordinate was returned.");

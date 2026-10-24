@@ -41,6 +41,32 @@ public class RonnieMailboxTests(ITestOutputHelper output) {
     }
 
     [Theory]
+    [InlineData("null")]
+    [InlineData("invalid-id")]
+    [InlineData("missing-coordinate")]
+    public async Task Malformed_manual_report_to_a_known_target_is_preserved(string detailShape) {
+        var mailbox = new List<int> { 900007 };
+        var result = await ProcessMailbox(mailbox, false, "known-target", detailShape);
+        Assert.Empty(result.deleted);
+        Assert.Equal(new[] { 900007 }, mailbox);
+    }
+
+    [Theory]
+    [InlineData("owned-probe", "null")]
+    [InlineData("owned-probe", "invalid-id")]
+    [InlineData("owned-probe", "missing-coordinate")]
+    [InlineData("owned-report", "null")]
+    [InlineData("owned-report", "invalid-id")]
+    [InlineData("owned-report", "missing-coordinate")]
+    public async Task Malformed_owned_report_can_be_cleaned_with_proven_probe_or_report_identity(string ownership, string detailShape) {
+        var mailbox = new List<int> { 900008 };
+        var result = await ProcessMailbox(mailbox, false, ownership, detailShape);
+        Assert.True(result.complete);
+        Assert.Equal(new[] { 900008 }, result.deleted);
+        Assert.Empty(mailbox);
+    }
+
+    [Theory]
     [InlineData("repeat")]
     [InlineData("limit")]
     [InlineData("error")]
@@ -55,7 +81,7 @@ public class RonnieMailboxTests(ITestOutputHelper output) {
         Assert.False(result.complete);
     }
 
-    private static async Task<(bool complete, List<int> read, List<int> deleted)> ProcessMailbox(List<int> mailbox, bool processAllReports, string mode = "") {
+    private static async Task<(bool complete, List<int> read, List<int> deleted)> ProcessMailbox(List<int> mailbox, bool processAllReports, string mode = "", string detailShape = "") {
         var now = new DateTime(2026, 10, 24, 12, 0, 0, DateTimeKind.Utc);
         var reports = mailbox.ToDictionary(id => id, id => new EspionageReport {
             ID = id,
@@ -75,7 +101,14 @@ public class RonnieMailboxTests(ITestOutputHelper output) {
             fleets = new List<Fleet>(), slots = new Slots { Total = 10 },
             serverData = new ServerData(), userInfo = new UserInfo(), researches = new Researches()
         };
-        if (mode == "known-target") data.farmTargets.Add(new FarmTarget(new Planet { Coordinate = reports[900006].Coordinate }, FarmState.AttackPending));
+        if (mode == "known-target" || mode.StartsWith("owned-")) {
+            var report = reports.Values.Single();
+            var target = new FarmTarget(new Planet { Coordinate = report.Coordinate },
+                mode == "owned-probe" ? FarmState.ProbesSent : FarmState.AttackPending);
+            if (mode == "owned-probe") target.ProbeFleetId = 700008;
+            if (mode == "owned-report") target.Report = report;
+            data.farmTargets.Add(target);
+        }
         var alias = "audit-" + Guid.NewGuid().ToString("N");
         var parent = AuditProxy<ITBotMain>.Make((method, _) => method.Name switch {
             "get_InstanceAlias" => alias,
@@ -94,6 +127,9 @@ public class RonnieMailboxTests(ITestOutputHelper output) {
             }
             if (method.Name == nameof(IOgameService.GetEspionageReport)) {
                 read.Add((int)args[0]);
+                if (detailShape == "null") return Task.FromResult<EspionageReport>(null);
+                if (detailShape == "invalid-id") return Task.FromResult(new EspionageReport { ID = 0, Coordinate = reports[(int)args[0]].Coordinate });
+                if (detailShape == "missing-coordinate") return Task.FromResult(new EspionageReport { ID = (int)args[0] });
                 return Task.FromResult(reports[(int)args[0]]);
             }
             if (method.Name == nameof(IOgameService.DeleteReport)) {

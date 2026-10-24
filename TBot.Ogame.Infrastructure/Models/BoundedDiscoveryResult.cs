@@ -5,6 +5,6 @@ namespace TBot.Ogame.Infrastructure.Models {
     public sealed class BoundedDiscoveryResult {
         public List<Coordinate> Coordinates { get; set; } = new();
         public bool Complete { get; set; }
-        public string Error { get; set; }
+        public string? Error { get; set; }
     }
 }

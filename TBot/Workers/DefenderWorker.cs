@@ -464,26 +464,16 @@ namespace Tbot.Workers {
 				double remainingSeconds = Math.Max(0, (scheduled.ApproxArrivalUtc - DateTime.UtcNow).TotalSeconds);
 				long minFlightTime = (long) (remainingSeconds + (remainingSeconds / 100 * 30) + (RandomizeHelper.CalcRandomInterval(IntervalType.SomeSeconds) / 1000));
 
-				_tbotInstance.UserData.fleets = await _fleetScheduler.UpdateFleets();
-				var beforeIds = _tbotInstance.UserData.fleets.Select(f => f.ID).ToHashSet();
-
 				DoLog(LogLevel.Warning, $"Sending fleet away from {celestial.ToString()} ahead of incoming attack.");
-				await _fleetScheduler.AutoFleetSave(celestial, false, minFlightTime);
-
-				_tbotInstance.UserData.fleets = await _fleetScheduler.UpdateFleets();
-				var newFleetIds = _tbotInstance.UserData.fleets
-					.Where(f => !beforeIds.Contains(f.ID))
-					.Where(f => f.Origin != null && celestial.HasCoords(f.Origin))
-					.Select(f => f.ID)
-					.ToList();
-
-				if (newFleetIds.Count > 0) {
+				var confirmedFleetId = await _fleetScheduler.AutoFleetSaveWithResult(celestial, minFlightTime);
+				if (confirmedFleetId > 0) {
+					var savedFleetId = confirmedFleetId.Value;
 					_awaySavedFleets.AddOrUpdate(celestial.ID,
-						_ => newFleetIds,
-						(_, existing) => existing.Union(newFleetIds).ToList());
-					DoLog(LogLevel.Information, $"Tracking {newFleetIds.Count} saved fleet(s) from {celestial.ToString()} for later recall.");
+						_ => new List<int> { savedFleetId },
+						(_, existing) => existing.Union(new[] { savedFleetId }).ToList());
+					DoLog(LogLevel.Information, $"Tracking confirmed defensive fleet {savedFleetId} from {celestial.ToString()} for later recall.");
 				} else {
-					DoLog(LogLevel.Warning, $"Fleetsave triggered for {celestial.ToString()} but no new outbound fleet was detected; recall tracking skipped.");
+					DoLog(LogLevel.Warning, $"Fleetsave triggered for {celestial.ToString()} but returned no confirmed fleet ID; recall tracking skipped.");
 				}
 			} catch (TaskCanceledException) {
 				DoLog(LogLevel.Information, $"Scheduled fleetsave for {celestial.ToString()} was cancelled (superseded by an earlier-arriving attack, or the bot is shutting down).");

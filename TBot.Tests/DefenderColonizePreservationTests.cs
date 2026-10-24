@@ -11,6 +11,46 @@ namespace TBot.Tests;
 
 public class DefenderColonizePreservationTests {
     [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Defensive_recall_never_tracks_or_cancels_an_interleaved_unrelated_same_origin_fleet(bool confirmedSave) {
+        var settings = SettingsService.GetMergedSettingsFromContents("{}", new List<string> { "{}" });
+        var planet = BrainDataFixture.Planet(91005, 5);
+        var data = new UserData { celestials = new() { planet }, fleets = new() };
+        var unrelated = new Fleet { ID = 880001, Origin = planet.Coordinate, Destination = new Coordinate(1, 7, 3), Mission = Missions.Transport };
+        var defensive = new Fleet { ID = 880002, Origin = planet.Coordinate, Destination = new Coordinate(1, 8, 4), Mission = Missions.Deploy };
+        var canceled = new List<int>();
+        var scheduler = AuditProxy<IFleetScheduler>.Make((method, args) => {
+            if (method.Name == nameof(IFleetScheduler.UpdateFleets)) return Task.FromResult(data.fleets.ToList());
+            if (method.Name == nameof(IFleetScheduler.CancelFleet)) { canceled.Add(((Fleet)args[0]).ID); return Task.CompletedTask; }
+            if (method.Name == nameof(IFleetScheduler.AutoFleetSave) || method.Name == "AutoFleetSaveWithResult") {
+                // Deterministically put another worker's launch in the old snapshot
+                // gap. Only the defensive operation's returned ID proves ownership.
+                data.fleets.Add(unrelated);
+                data.fleets.Add(defensive);
+                return method.Name == "AutoFleetSaveWithResult"
+                    ? Task.FromResult<int?>(confirmedSave ? defensive.ID : null)
+                    : Task.CompletedTask;
+            }
+            return AuditProxy<IFleetScheduler>.Default(method.ReturnType);
+        });
+        var ogame = AuditProxy<IOgameService>.Make((m, _) => m.Name == nameof(IOgameService.GetAttacks)
+            ? Task.FromResult(new List<AttackerFleet>()) : AuditProxy<IOgameService>.Default(m.ReturnType));
+        var worker = Defender(Parent(settings, data), scheduler, Bridge(), ogame);
+        var save = Scheduled(worker, "ScheduledFleetSave");
+        save.GetType().GetField("ApproxArrivalUtc").SetValue(save, DateTime.UtcNow.AddSeconds(30));
+        await Invoke(worker, "RunScheduledFleetSave", planet, save);
+        var tracked = (System.Collections.IDictionary)worker.GetType().GetField("_awaySavedFleets", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(worker);
+        var ownedIds = tracked.Contains(planet.ID) ? ((List<int>)tracked[planet.ID]).ToArray() : Array.Empty<int>();
+        await Invoke(worker, "RunScheduledRecall", planet, Scheduled(worker, "ScheduledRecall"));
+
+        Assert.DoesNotContain(unrelated.ID, ownedIds);
+        Assert.DoesNotContain(unrelated.ID, canceled);
+        Assert.Equal(confirmedSave ? new[] { defensive.ID } : Array.Empty<int>(), ownedIds);
+        Assert.Equal(confirmedSave ? new[] { defensive.ID } : Array.Empty<int>(), canceled);
+    }
+
+    [Theory]
     [InlineData("defender")]
     [InlineData("colonize")]
     public async Task Stopping_a_worker_cancels_and_awaits_its_background_actions(string feature) {
@@ -54,6 +94,7 @@ public class DefenderColonizePreservationTests {
         var scheduler = AuditProxy<IFleetScheduler>.Make((m, _) => m.Name switch {
             nameof(IFleetScheduler.UpdateFleets) => Task.FromResult(data.fleets),
             nameof(IFleetScheduler.AutoFleetSave) => Signal(),
+            "AutoFleetSaveWithResult" => SignalResult(),
             _ => AuditProxy<IFleetScheduler>.Default(m.ReturnType)
         });
         using var cts = new CancellationTokenSource();
@@ -64,6 +105,7 @@ public class DefenderColonizePreservationTests {
             await saved.Task.WaitAsync(TimeSpan.FromSeconds(3));
         } finally { cts.Cancel(); }
         Task Signal() { saved.TrySetResult(); return Task.CompletedTask; }
+        Task<int?> SignalResult() { saved.TrySetResult(); return Task.FromResult<int?>(null); }
     }
 
     [Fact]
@@ -121,9 +163,16 @@ public class DefenderColonizePreservationTests {
         Assert.Empty(abandoned);
     }
 
-    private static object Defender(ITBotMain parent, IFleetScheduler scheduler, ITBotOgamedBridge bridge) => Activator.CreateInstance(
+    private static object Scheduled(object worker, string name) {
+        var type = worker.GetType().GetNestedType(name, BindingFlags.NonPublic);
+        var scheduled = Activator.CreateInstance(type, nonPublic: true);
+        type.GetField("ScheduledAtUtc").SetValue(scheduled, DateTime.UtcNow.AddMinutes(-1));
+        type.GetField("Cts").SetValue(scheduled, new CancellationTokenSource());
+        return scheduled;
+    }
+    private static object Defender(ITBotMain parent, IFleetScheduler scheduler, ITBotOgamedBridge bridge, IOgameService ogame = null) => Activator.CreateInstance(
         typeof(FleetScheduler).Assembly.GetType("Tbot.Workers.DefenderWorker"), parent,
-        AuditProxy<IOgameService>.Make((m, _) => AuditProxy<IOgameService>.Default(m.ReturnType)), scheduler, bridge);
+        ogame ?? AuditProxy<IOgameService>.Make((m, _) => AuditProxy<IOgameService>.Default(m.ReturnType)), scheduler, bridge);
     private static ITBotMain Parent(object settings, UserData data) => AuditProxy<ITBotMain>.Make((m, _) => m.Name switch {
         "get_InstanceSettings" => settings, "get_InstanceAlias" => "offline-defense", "get_UserData" => data,
         _ => AuditProxy<ITBotMain>.Default(m.ReturnType)
