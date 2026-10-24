@@ -357,3 +357,6 @@ data/
 # Local Python tooling bytecode
 __pycache__/
 *.py[cod]
+
+# Versioned public release notes
+!/docs/releases/
