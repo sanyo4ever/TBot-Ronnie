@@ -34,9 +34,9 @@ The bounded system-discovery route is a paired C#/Go contract: `/bot/planets/:pl
 
 ## Version policy
 
-The public version is the reviewed author release followed by one lowercase fork letter. `fork-version.json` records the upstream repository, release/commit, source branch/commit and our revision. The current release identity is `3.5.1-beta2a`. The CLI rejects requested labels that contradict this checked-in policy.
+The public version is the reviewed author release followed by one lowercase fork letter. `fork-version.json` records the upstream repository, release/commit, source branch/commit and our revision. The current release identity is `3.5.1-beta2d`. The CLI rejects requested labels that contradict this checked-in policy.
 
-For this beta-derived release, NuGet Version is `3.5.1-beta2.a`; InformationalVersion, console title, GitHub tag and ZIP names use `3.5.1-beta2a`; numeric AssemblyVersion and FileVersion inputs are `3.5.1`. The .NET informational attribute can also include the built commit after `+`; the title omits that build metadata. Existing stable-base behavior remains `3.4.6b` publicly and `3.4.6-b` for NuGet.
+For this beta-derived release, NuGet Version is `3.5.1-beta2.d`; InformationalVersion, console title, GitHub tag and ZIP names use `3.5.1-beta2d`; numeric AssemblyVersion and FileVersion inputs are `3.5.1`. The .NET informational attribute can also include the built commit after `+`; the title omits that build metadata. Existing stable-base behavior remains `3.4.6b` publicly and `3.4.6-b` for NuGet.
 
 CI obtains all metadata from `tools/release_version.py` and passes it to both the C# regression test build and publication. Ordinary CI uses an identifiable `-ci.RUN` public suffix and creates no release tag. The title tests exercise the compiled application's actual informational metadata, including our fork identity.
 
