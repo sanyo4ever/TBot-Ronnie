@@ -169,6 +169,42 @@ namespace Tbot.Workers {
 			if (availablePrimary % pendingFromOrigin != 0)
 				primaryShare++;
 			fleet.SetAmount(primaryShip, Math.Min(fleet.GetAmount(primaryShip), primaryShare));
+			return AddSecondaryExpeditionShips(fleet, availableShips, primaryShip, pendingFromOrigin);
+		}
+
+		private Ships AddSecondaryExpeditionShips(Ships fleet, Ships availableShips, Buildables primaryShip, int pendingFromOrigin) {
+			var settings = _tbotInstance.InstanceSettings.Expeditions;
+			string configuredShip = SettingsService.GetSetting<string>(settings, "SecondaryShip", "Null");
+			if (!Enum.TryParse<Buildables>(configuredShip, true, out var secondaryShip))
+				throw new ArgumentException("Expeditions.SecondaryShip must name a movable ship or Null.");
+			if (secondaryShip == Buildables.Null)
+				return fleet;
+			if (secondaryShip == primaryShip || secondaryShip == Buildables.SolarSatellite || secondaryShip == Buildables.Crawler ||
+				typeof(Ships).GetProperty(secondaryShip.ToString()) == null)
+				throw new ArgumentException("Expeditions.SecondaryShip must be a movable ship different from PrimaryShip.");
+
+			decimal ratio = SettingsService.GetSetting<decimal>(settings, "SecondaryToPrimaryRatio", 2M);
+			long minimum = SettingsService.GetSetting<long>(settings, "MinSecondaryToSend", 0L);
+			if (ratio < 0 || minimum < 0)
+				throw new ArgumentException("Expeditions.SecondaryToPrimaryRatio and MinSecondaryToSend must be non-negative.");
+
+			// An escort may already use this type. Only unselected stock can be added.
+			var stock = Math.Max(0, availableShips.GetAmount(secondaryShip));
+			var available = Math.Max(0, stock - Math.Max(0, fleet.GetAmount(secondaryShip)));
+			var share = available / pendingFromOrigin;
+			if (available % pendingFromOrigin != 0)
+				share++;
+			var primaryCount = Math.Max(0, fleet.GetAmount(primaryShip));
+			// Compare before multiplication to saturate even extremely large configured ratios.
+			var ratioLimit = primaryCount == 0 ? 0L :
+				ratio >= (decimal)long.MaxValue / primaryCount ? long.MaxValue :
+				(long)decimal.Floor(primaryCount * ratio);
+			var secondaryToSend = Math.Min(share, ratioLimit);
+			if (secondaryToSend < minimum) {
+				DoLog(LogLevel.Warning, $"Unable to prepare expedition: shared {secondaryShip} amount {secondaryToSend} is below MinSecondaryToSend {minimum}.");
+				return new Ships();
+			}
+			fleet.Add(secondaryShip, secondaryToSend);
 			return fleet;
 		}
 
