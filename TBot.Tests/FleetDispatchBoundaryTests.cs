@@ -205,6 +205,75 @@ public class FleetDispatchBoundaryTests {
         Assert.Equal(1, f.Posts);
     }
 
+    [Fact]
+    public async Task Explicit_fuel_rejection_allows_a_later_expedition_after_refuelling_without_inline_replay() {
+        using var f = new Fixture();
+        f.MaxPosts = 2;
+        f.Body = """{"Status":"error","Code":500,"Message":"Not enough deuterium! (140026)","Result":null}""";
+        Assert.Equal((int)SendFleetCode.GenericError, await f.Send(Missions.Expedition));
+        Assert.Equal(1, f.Posts);
+        Assert.Empty(f.Data.fleets);
+        Assert.Contains(f.LogMessages, message => message.Contains("Not enough deuterium! (140026)"));
+
+        f.Origin.Resources.Deuterium = 200000;
+        f.Status = HttpStatusCode.OK;
+        var accepted = f.Movement(4012);
+        accepted.Mission = Missions.Expedition;
+        f.Body = JsonConvert.SerializeObject(new { status = "ok", result = accepted });
+        Assert.Equal(4012, await f.Send(Missions.Expedition));
+        Assert.Equal(2, f.Posts);
+        Assert.Equal(4012, Assert.Single(f.Data.fleets).ID);
+    }
+
+    [Theory]
+    [InlineData("{\"Status\":\"error\",\"Code\":500,\"Message\":\"Not enough deuterium! (140026)\",\"Result\":null}", 502)]
+    [InlineData("{\"Status\":\"error\",\"Code\":502,\"Message\":\"Not enough deuterium! (140026)\",\"Result\":null}", 500)]
+    [InlineData("{\"Status\":\"failure\",\"Code\":500,\"Message\":\"Not enough deuterium! (140026)\",\"Result\":null}", 500)]
+    [InlineData("{\"Status\":\"error\",\"Code\":500,\"Message\":\"Not enough deuterium! (140026)\",\"Result\":{\"ID\":4013}}", 500)]
+    [InlineData("{\"Status\":\"error\",\"Code\":500,\"Message\":\"Not enough deuterium! (140027)\",\"Result\":null}", 500)]
+    [InlineData("{\"Status\":\"error\",\"Code\":500,\"Message\":\"Not enough deuterium!\",\"Result\":null}", 500)]
+    [InlineData("{\"Status\":\"error\",\"Code\":500,\"Message\":\"response lost after Not enough deuterium! (140026)\",\"Result\":null}", 500)]
+    [InlineData("{\"Status\":\"error\",\"Message\":\"Not enough deuterium! (140026)\"}", 500)]
+    [InlineData("{\"Status\":\"error\",\"Code\":500,\"Message\":null,\"Result\":null}", 500)]
+    [InlineData("{\"Status\":\"error\",\"Code\":500,\"Message\":\"fleet movement could not be read\",\"Result\":null}", 500)]
+    [InlineData("{\"Status\":\"error\",\"Code\":500,\"Message\":\"Not enough deuterium! (140026)\"", 500)]
+    [InlineData("{\"Status\":\"error\",\"Code\":500,\"Message\":\"Not enough deuterium! (140026)\"}", 500)]
+    [InlineData("{\"Status\":\"error\",\"Code\":\"500\",\"Message\":\"Not enough deuterium! (140026)\",\"Result\":null}", 500)]
+    [InlineData("{\"Status\":\"error\",\"Code\":500.0,\"Message\":\"Not enough deuterium! (140026)\",\"Result\":null}", 500)]
+    [InlineData("{\"Status\":\"ok\",\"Status\":\"error\",\"Code\":500,\"Message\":\"Not enough deuterium! (140026)\",\"Result\":null}", 500)]
+    [InlineData("{\"status\":\"ok\",\"Status\":\"error\",\"Code\":500,\"Message\":\"Not enough deuterium! (140026)\",\"Result\":null}", 500)]
+    [InlineData("{\"Status\":\"error\",\"Code\":200,\"Code\":500,\"Message\":\"Not enough deuterium! (140026)\",\"Result\":null}", 500)]
+    [InlineData("{\"Status\":\"error\",\"Code\":500,\"Message\":\"accepted\",\"Message\":\"Not enough deuterium! (140026)\",\"Result\":null}", 500)]
+    [InlineData("{\"Status\":\"error\",\"Code\":500,\"Message\":\"Not enough deuterium! (140026)\",\"Result\":{\"ID\":4015},\"Result\":null}", 500)]
+    [InlineData("{\"Status\":\"error\",\"Code\":500,\"Message\":\"Not enough deuterium! (140026)\",\"Result\":null,\"Success\":true}", 500)]
+    [InlineData("{\"Status\":\"error\",\"Code\":500,\"Message\":\"Not enough deuterium! (140026)\",\"Result\":null,}", 500)]
+    [InlineData("{'Status':'error','Code':500,'Message':'Not enough deuterium! (140026)','Result':null}", 500)]
+    public async Task Unproven_fuel_like_failures_remain_uncertain_and_cannot_be_replayed(string body, int status) {
+        using var f = new Fixture();
+        f.Status = (HttpStatusCode)status;
+        f.Body = body;
+        Assert.Equal((int)SendFleetCode.AmbiguousDispatch, await f.Send(Missions.Expedition));
+        Assert.Equal((int)SendFleetCode.AmbiguousDispatch, await f.Send(Missions.Expedition));
+        Assert.Equal(1, f.Posts);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Lost_transport_response_still_requires_positive_movement_evidence(bool timeout, bool accepted) {
+        using var f = new Fixture();
+        f.PostFailure = timeout ? new TaskCanceledException("synthetic lost response") : new HttpRequestException("synthetic disconnected transport");
+        var fleet = f.Movement(4014);
+        fleet.Mission = Missions.Expedition;
+        if (accepted) f.AfterSend.Add(fleet);
+        Assert.Equal(accepted ? 4014 : (int)SendFleetCode.AmbiguousDispatch, await f.Send(Missions.Expedition));
+        if (!accepted) Assert.Equal((int)SendFleetCode.AmbiguousDispatch, await f.Send(Missions.Expedition));
+        Assert.Equal(1, f.Posts);
+        Assert.Equal(accepted ? 1 : 0, f.Data.fleets.Count);
+    }
+
     [Theory]
     [InlineData("{} ")]
     [InlineData("null")]
@@ -258,6 +327,9 @@ public class FleetDispatchBoundaryTests {
         public List<Fleet> BeforeSend = new();
         public List<Fleet> AfterSend = new();
         public int Posts;
+        public int MaxPosts = 1;
+        public Exception PostFailure;
+        public List<string> LogMessages = new();
         public bool FailSlotRefresh;
         public long FleetSaveFuelCapacity;
         private int slotReads;
@@ -270,7 +342,8 @@ public class FleetDispatchBoundaryTests {
             var service = new OgameService(logger);
             client = new HttpClient(new Handler(request => {
                 if (request.Method == HttpMethod.Post) {
-                    Posts++; if (Posts > 1) throw new InvalidOperationException("unexpected replay");
+                    Posts++; if (Posts > MaxPosts) throw new InvalidOperationException("unexpected replay");
+                    if (PostFailure != null) throw PostFailure;
                     return new HttpResponseMessage(Status) { Content = new StringContent(Body, Encoding.UTF8, "application/json") };
                 }
                 return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(JsonConvert.SerializeObject(new { status = "ok", result = Posts == 0 ? BeforeSend : AfterSend })) };
@@ -287,7 +360,10 @@ public class FleetDispatchBoundaryTests {
         }
         public FleetScheduler CreateScheduler(IOgameService ogame) {
             var settings = SettingsService.GetMergedSettingsFromContents("{\"General\":{\"SlotsToLeaveFree\":0},\"SleepMode\":{\"Active\":false,\"AutoFleetSave\":{\"DeutToLeave\":0,\"Recall\":false,\"DefaultMission\":\"Deploy\"}}}", new List<string> { "{}" });
-            var parent = AuditProxy<ITBotMain>.Make((method, _) => method.Name switch { "get_InstanceSettings" => (object)settings, "get_InstanceAlias" => "offline-fleets", "get_UserData" => Data, _ => AuditProxy<ITBotMain>.Default(method.ReturnType) });
+            var parent = AuditProxy<ITBotMain>.Make((method, args) => {
+                if (method.Name == nameof(ITBotMain.log)) { LogMessages.Add((string)args[2]); return null; }
+                return method.Name switch { "get_InstanceSettings" => (object)settings, "get_InstanceAlias" => "offline-fleets", "get_UserData" => Data, _ => AuditProxy<ITBotMain>.Default(method.ReturnType) };
+            });
             var calc = AuditProxy<ICalculationService>.Make((method, _) => method.Name switch {
                 nameof(ICalculationService.GetValidSpeedsForClass) => new List<decimal> { Speeds.HundredPercent },
                 nameof(ICalculationService.CalcFleetPrediction) => new FleetPrediction { Time = 60, Fuel = 10 },

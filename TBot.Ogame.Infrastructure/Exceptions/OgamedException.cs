@@ -9,6 +9,7 @@ namespace TBot.Ogame.Infrastructure.Exceptions {
 	[Serializable]
 	public class OgamedException : Exception {
 		public System.Net.HttpStatusCode? StatusCode { get; internal set; }
+		public bool IsDefinitiveFleetFuelRejection { get; internal set; }
 		public OgamedException() {
 		}
 

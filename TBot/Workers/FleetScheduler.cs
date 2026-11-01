@@ -882,7 +882,8 @@ if (fleet == null) return;
 					catch (Exception e) { _tbotInstance.log(LogLevel.Debug, LogSender.FleetScheduler, $"Fleet {newFleet.ID} was accepted, but slot refresh failed: {e.Message}"); }
 					return newFleet.ID;
 				} catch (Exception e) {
-					if (e is OgamedException rejection && rejection.StatusCode == HttpStatusCode.BadRequest) {
+					if (e is OgamedException rejection &&
+						(rejection.StatusCode == HttpStatusCode.BadRequest || rejection.IsDefinitiveFleetFuelRejection)) {
 						_tbotInstance.log(LogLevel.Warning, LogSender.FleetScheduler, $"Fleet rejected: {e.Message}");
 						return (int)SendFleetCode.GenericError;
 					}

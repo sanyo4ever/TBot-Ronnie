@@ -234,9 +234,11 @@ namespace TBot.Ogame.Infrastructure {
 
 		private async Task<T> ManageResponse<T>(HttpResponseMessage response) {
 			OgamedResponse result = null;
+			bool definitiveFleetFuelRejection = false;
 			try {
 				var jsonResponseContent = await response.Content.ReadAsStringAsync();
 				if (jsonResponseContent != null) {
+					definitiveFleetFuelRejection = IsDefinitiveFleetFuelRejection(response.StatusCode, jsonResponseContent);
 					result = JsonConvert.DeserializeObject<OgamedResponse>(jsonResponseContent, new JsonSerializerSettings {
 						DateTimeZoneHandling = DateTimeZoneHandling.Local,
 						NullValueHandling = NullValueHandling.Ignore
@@ -255,7 +257,11 @@ namespace TBot.Ogame.Infrastructure {
 						$"An error has occurred (HTTP {(int) response.StatusCode} {response.ReasonPhrase})");
 				}
 				else if (result.Status != "ok") {
-					throw new OgamedException($"An error has occurred: Status Code: {response.StatusCode} Status: {result?.Status} - Message: {result?.Message}");
+					throw new OgamedException($"An error has occurred: Status Code: {response.StatusCode} Status: {result?.Status} - Message: {result?.Message}") {
+						// Legacy ogamed flattens this explicit Gameforge rejection into HTTP 500.
+						// Recognize only the captured envelope; arbitrary 5xx outcomes stay uncertain.
+						IsDefinitiveFleetFuelRejection = definitiveFleetFuelRejection
+					};
 				} else {
 					if (result.Result is JObject) {
 						var jObject = result.Result as JObject;
@@ -288,6 +294,26 @@ namespace TBot.Ogame.Infrastructure {
 					return response;
 				});
 			return await ManageResponse<T>(response);
+		}
+
+		private static bool IsDefinitiveFleetFuelRejection(HttpStatusCode statusCode, string content) {
+			if (statusCode != HttpStatusCode.InternalServerError) return false;
+			try {
+				using var document = System.Text.Json.JsonDocument.Parse(content);
+				if (document.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object) return false;
+				var fields = new Dictionary<string, System.Text.Json.JsonElement>(StringComparer.OrdinalIgnoreCase);
+				foreach (var property in document.RootElement.EnumerateObject()) {
+					if (!fields.TryAdd(property.Name, property.Value)) return false;
+				}
+				return fields.Count == 4 &&
+					fields.TryGetValue("Status", out var status) && status.ValueKind == System.Text.Json.JsonValueKind.String && status.GetString() == "error" &&
+					fields.TryGetValue("Code", out var code) && code.ValueKind == System.Text.Json.JsonValueKind.Number && code.TryGetInt32(out var number) && number == 500 &&
+					fields.TryGetValue("Message", out var message) && message.ValueKind == System.Text.Json.JsonValueKind.String &&
+					message.GetString() == "Not enough deuterium! (140026)" &&
+					fields.TryGetValue("Result", out var result) && result.ValueKind == System.Text.Json.JsonValueKind.Null;
+			} catch (System.Text.Json.JsonException) {
+				return false;
+			}
 		}
 
 		private async Task<T> PostAsync<T>(string resource, params KeyValuePair<string, string>[] parameters) {
