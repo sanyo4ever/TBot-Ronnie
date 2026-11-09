@@ -1,0 +1,36 @@
+name: Manual timeout offline verification
+on:
+  push:
+    branches: [ci/manual-mode-timeout]
+permissions:
+  contents: read
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ogame/go.mod
+          cache-dependency-path: ogame/go.sum
+      - name: Release version policy
+        run: python3 -m unittest discover -s tools/tests -v
+      - name: Full CSharp regression tests
+        run: dotnet test TBot.sln -c Release -p:Version=3.5.1-beta2.f -p:InformationalVersion=3.5.1-beta2f -p:AssemblyVersion=3.5.1 -p:FileVersion=3.5.1
+      - name: Full Go tests and build
+        working-directory: ogame
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          go test -count=1 ./...
+          go build ./...
+      - name: Manual mode race detection
+        working-directory: ogame
+        env:
+          CGO_ENABLED: '1'
+        run: go test -race -count=1 ./cmd/ogamed-tbot -run Manual
