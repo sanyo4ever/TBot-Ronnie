@@ -9,7 +9,8 @@ namespace TBot.Ogame.Infrastructure {
 				ProxySettings proxySettings,
 				string host = "127.0.0.1",
 				int port = 8080,
-				string captchaKey = "");
+				string captchaKey = "",
+				int manualModeTimeoutSeconds = 120);
 		string GetExecutableName();
 		bool ValidatePrerequisites();
 		Task BuildCancelable(Celestial celestial, Buildables buildable);

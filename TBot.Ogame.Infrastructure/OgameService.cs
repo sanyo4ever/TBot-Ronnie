@@ -20,6 +20,7 @@ using System.Net.Http;
 using Polly;
 using Polly.Extensions.Http;
 using Polly.Retry;
+using Tbot.Common.Settings;
 
 namespace TBot.Ogame.Infrastructure {
 
@@ -36,6 +37,7 @@ namespace TBot.Ogame.Infrastructure {
 		private int _port;
 		private string _captchaKey;
 		private ProxySettings _proxySettings;
+		private int _manualModeTimeoutSeconds = ManualModeSettings.DefaultTimeoutSeconds;
 		private string _cookiesPath;
 
 		public event EventHandler OnError;
@@ -51,13 +53,17 @@ namespace TBot.Ogame.Infrastructure {
 				ProxySettings proxySettings,
 				string host = "127.0.0.1",
 				int port = 8080,
-				string captchaKey = "") {
+				string captchaKey = "",
+				int manualModeTimeoutSeconds = ManualModeSettings.DefaultTimeoutSeconds) {
+			if (manualModeTimeoutSeconds <= 0)
+				throw new ArgumentOutOfRangeException(nameof(manualModeTimeoutSeconds), "Manual mode timeout must be positive.");
 			_credentials = credentials;
 			_device = device;
 			_host = host;
 			_port = port;
 			_captchaKey = captchaKey;
 			_proxySettings = proxySettings;
+			_manualModeTimeoutSeconds = manualModeTimeoutSeconds;
 
 			_username = credentials.Username;
 
@@ -107,6 +113,7 @@ namespace TBot.Ogame.Infrastructure {
 			Process? ogameProc = null;
 			try {
 				string args = $"--universe=\"{credentials.Universe}\" --username={credentials.Username} --password={credentials.Password} --device-name={device.Name} --language={credentials.Language} --auto-login=false --port={port} --host=0.0.0.0";
+				args += $" --manual-mode-timeout-seconds={_manualModeTimeoutSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
 				if (captchaKey != "")
 					args += $" --nja-api-key={captchaKey}";
 				if (proxySettings.Enabled) {
@@ -159,27 +166,32 @@ namespace TBot.Ogame.Infrastructure {
 					args += $" --device-lang={device.Lang}";
 				}
 
-				ogameProc = new Process();
-				ogameProc.StartInfo.FileName = GetExecutableName();
-				ogameProc.StartInfo.Arguments = args;
-				ogameProc.EnableRaisingEvents = true;
-				ogameProc.StartInfo.RedirectStandardOutput = true;
-				ogameProc.StartInfo.RedirectStandardError = true;
-				ogameProc.StartInfo.RedirectStandardInput = true;
-				ogameProc.Exited += handle_ogamedProcess_Exited;
-				ogameProc.OutputDataReceived += handle_ogamedProcess_OutputDataReceived;
-				ogameProc.ErrorDataReceived += handle_ogamedProcess_ErrorDataReceived;
-
-				ogameProc.Start();
-				ogameProc.BeginErrorReadLine();
-				ogameProc.BeginOutputReadLine();
-
-				_logger.WriteLog(LogLevel.Information, LogSender.OGameD, $"OgameD Started with PID {ogameProc.Id}");   // This would raise an exception
+				ogameProc = StartOgamedProcess(args);
 				_mustKill = false;
 			} catch (Exception ex) {
 				_logger.WriteLog(LogLevel.Error, LogSender.OGameD, $"Error executing ogamed instance: {ex.Message}");
 				Environment.Exit(0);
 			}
+			return ogameProc;
+		}
+
+		// Kept separate from argument construction so the complete startup/restart
+		// contract can be exercised offline without launching a game daemon.
+		protected virtual Process StartOgamedProcess(string arguments) {
+			var ogameProc = new Process();
+			ogameProc.StartInfo.FileName = GetExecutableName();
+			ogameProc.StartInfo.Arguments = arguments;
+			ogameProc.EnableRaisingEvents = true;
+			ogameProc.StartInfo.RedirectStandardOutput = true;
+			ogameProc.StartInfo.RedirectStandardError = true;
+			ogameProc.StartInfo.RedirectStandardInput = true;
+			ogameProc.Exited += handle_ogamedProcess_Exited;
+			ogameProc.OutputDataReceived += handle_ogamedProcess_OutputDataReceived;
+			ogameProc.ErrorDataReceived += handle_ogamedProcess_ErrorDataReceived;
+			ogameProc.Start();
+			ogameProc.BeginErrorReadLine();
+			ogameProc.BeginOutputReadLine();
+			_logger.WriteLog(LogLevel.Information, LogSender.OGameD, $"OgameD Started with PID {ogameProc.Id}");
 			return ogameProc;
 		}
 

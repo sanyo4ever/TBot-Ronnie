@@ -26,6 +26,7 @@
 	"General": {
 		"Host": "localhost",
 		"Port": "8080",
+		"ManualModeTimeoutSeconds": 120,
 		"Proxy": {
 			"Enabled": false,
 			"Address": "",

@@ -158,6 +158,7 @@ namespace Tbot.Services {
 
 
 		private async Task InitializeOgame() {
+			int manualModeTimeoutSeconds = ManualModeSettings.ReadTimeoutSeconds((object)InstanceSettings.General);
 			string host = (string) InstanceSettings.General.Host ?? "localhost";
 			string port = (string) InstanceSettings.General.Port ?? "8080";
 			if (!_ogameService.IsPortAvailable(host, int.Parse(port))) {
@@ -191,7 +192,7 @@ namespace Tbot.Services {
 			}
 
 
-			_ogameService.Initialize(GetCredentialsFromSettings(), GetDeviceFromSettings(), proxy, (string) host, int.Parse(port), (string) captchaKey);
+			_ogameService.Initialize(GetCredentialsFromSettings(), GetDeviceFromSettings(), proxy, (string) host, int.Parse(port), (string) captchaKey, manualModeTimeoutSeconds);
 			await Task.Delay(RandomizeHelper.CalcRandomInterval(IntervalType.AFewSeconds));
 		}
 
