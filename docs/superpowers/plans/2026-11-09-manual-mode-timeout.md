@@ -21,9 +21,9 @@
 
 ## Tasks and review focus
 
-- [ ] Go: offline regression tests for default/custom timeout, invalid values, activation/GET/POST renewal and release; implement shared duration configuration. Avoid an unrelated wrapper refactor.
-- [ ] C#: offline tests for old config, custom/invalid settings and process argument forwarding; implement and retain the startup option on restart.
-- [ ] Independently review both changes and startup/restart wiring; run relevant and full available tests. Report environment or baseline failures honestly.
+- [x] Go: offline regression tests for default/custom timeout, invalid values, activation/GET/POST renewal and release; implement shared duration configuration. Avoid an unrelated wrapper refactor.
+- [x] C#: offline tests for old config, custom/invalid settings and process argument forwarding; implement and retain the startup option on restart.
+- [x] Independently review both changes and startup/restart wiring; run relevant and full available tests. Report environment or baseline failures honestly.
 - [ ] Publish exact Go commit on our branch, pin it in TBot; set revision f, document behavior and checks, commit reviewed TBot change to our main.
 - [ ] Run release workflow; verify all seven archives, source SHAs, versions and checksums, then publish prerelease 3.5.1-beta2f.
 - [ ] Download published Windows x64 archive, verify SHA256, prepare sibling installation with current settings and safe state migration. Do not start it.
